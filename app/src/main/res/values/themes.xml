@@ -1,0 +1,8 @@
+<resources>
+    <!--
+        Only used for the window background before Compose's first frame
+        draws. All real theming (colors, typography, dark mode) lives in
+        ui/theme/Theme.kt so it can respond to system dark mode dynamically.
+    -->
+    <style name="Theme.EisCamera" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
