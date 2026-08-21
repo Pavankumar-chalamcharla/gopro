@@ -47,6 +47,53 @@ case — see the interpretation caveat in
 `SensorQualityAnalyzer.analyzeDynamicResponse` kdoc for what that
 cross-check can and cannot prove on its own.
 
+The stationary-phase measurement on real hardware also caught something
+the declared numbers alone couldn't: measured rate came back ~199 Hz
+against a DECLARED rate of ~100 Hz — a 2x mismatch. That kind of gap
+between declared and measured is exactly why V0.2's kdoc always insisted
+declared values are provisional; this is the first concrete case of it
+mattering.
+
+## V0.3 bug found and fixed via real-device testing: quaternion double cover
+
+Following the project's debugging methodology (spec section 40):
+
+```
+Observed:    Dynamic-response test reported a rotation-vector-derived
+             peak angular velocity of ~1187 rad/s (≈68,000°/s) — a value
+             no phone flick can physically produce.
+Hypothesis:  A bug in the quaternion-differencing math, not the sensor.
+Measurement: Isolated the exact two-quaternion pair driving the spike;
+             reproduced it in a standalone numeric check.
+Experiment:  Constructed a synthetic case — a small, genuinely tiny
+             rotation (0.10 rad over 10ms, true rate 10 rad/s) whose
+             second sample was deliberately sign-flipped (q vs -q, which
+             represent the identical physical orientation for any unit
+             quaternion — the "double cover" property). The buggy code
+             recovered ~618 rad/s from that flipped sample instead of 10.
+Root cause:  Android's rotation-vector sensor does not guarantee a
+             consistent quaternion sign/hemisphere between consecutive
+             samples. The angle-recovery formula used the raw scalar
+             (dot-product) term directly; when a sign flip occurred, a
+             near-1 dot product became near-(-1), and acos() turned a
+             near-zero angle into a near-180° one.
+Minimal fix: Take the absolute value of the dot product before acos().
+             cos(Δθ/2) = |dot(q1,q2)| is invariant to either input's
+             sign, and correctly recovers the shortest relative rotation
+             regardless of which hemisphere each sample happened to
+             report on.
+Regression
+  test:      SensorQualityAnalyzerTest — "quaternionAngularVelocityMagnitude
+             is immune to a sign-flipped sample" constructs exactly this
+             scenario and asserts the small true rate is still recovered.
+```
+
+This is a good illustration of why real-device testing matters even for
+pure-math code that passed every unit test against synthetic data: the
+synthetic test data was constructed from a smooth, continuous formula that
+never triggers a sign discontinuity, so it couldn't have caught this on
+its own. Real sensor data did.
+
 ## What schema/architecture changed in V0.3
 
 - `DeviceProfile.SCHEMA_VERSION` bumped 1 -> 2, adding a nullable

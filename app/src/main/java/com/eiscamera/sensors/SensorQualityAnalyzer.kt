@@ -1,5 +1,6 @@
 package com.eiscamera.sensors
 
+import kotlin.math.abs
 import kotlin.math.acos
 import kotlin.math.max
 import kotlin.math.min
@@ -135,11 +136,13 @@ object SensorQualityAnalyzer {
      *   describing absolute orientation, the relative rotation between
      *   them is q_delta = conjugate(q1) ⊗ q2 (Hamilton product; a unit
      *   quaternion's inverse equals its conjugate). The rotation ANGLE is
-     *   θ = 2·acos(clamp(w_delta, -1, 1)), and the average angular SPEED
-     *   over the interval is ω = θ / (t2 - t1). This is the reverse of the
-     *   usual gyro-integration equation θ(t) = θ(t0) + ∫ω(t)dt: here we
-     *   recover ω FROM two known orientations instead of integrating ω
-     *   INTO an orientation.
+     *   θ = 2·acos(|w_delta|) (see quaternionAngularVelocityMagnitude for
+     *   why the absolute value is necessary — real rotation-vector samples
+     *   are not guaranteed sign-continuous from one reading to the next),
+     *   and the average angular SPEED over the interval is ω = θ / (t2 -
+     *   t1). This is the reverse of the usual gyro-integration equation
+     *   θ(t) = θ(t0) + ∫ω(t)dt: here we recover ω FROM two known
+     *   orientations instead of integrating ω INTO an orientation.
      *
      *   Both series are then compared as MAGNITUDE only (sqrt(x²+y²+z²)
      *   for the gyro, |ω| for the rotation-vector-derived estimate) to
@@ -229,10 +232,28 @@ object SensorQualityAnalyzer {
         val w2 = q2[0].toDouble(); val x2 = q2[1].toDouble(); val y2 = q2[2].toDouble(); val z2 = q2[3].toDouble()
 
         // conjugate(q1) = (w1, -x1, -y1, -z1); Hamilton product q_delta = conj(q1) ⊗ q2.
-        // We only need the scalar (w) component to recover the rotation angle.
+        // We only need the scalar (w) component to recover the rotation angle — which,
+        // for unit quaternions, is algebraically just the 4D dot product of q1 and q2.
         val w = w1 * w2 - (-x1) * x2 - (-y1) * y2 - (-z1) * z2
-        val wClamped = w.coerceIn(-1.0, 1.0)
-        val angle = 2.0 * acos(wClamped)
+
+        // CRITICAL FIX (found via real-device testing — see docs/ROADMAP.md V0.3
+        // findings): unit quaternions have a "double cover" — q and -q represent
+        // the IDENTICAL physical orientation. Android's rotation-vector sensor
+        // does not guarantee a consistent sign/hemisphere from one sample to the
+        // next; two samples describing nearly the same orientation can land on
+        // opposite hemispheres, making the raw dot product swing sharply negative
+        // even though the true rotation between them was tiny. Taking the
+        // ABSOLUTE VALUE resolves this: cos(Δθ/2) = |dot(q1,q2)| is invariant to
+        // either input's sign and gives the true, shortest relative rotation
+        // angle regardless of which sign each sample happened to report. Without
+        // this fix, a single sign flip turns a fraction-of-a-degree rotation into
+        // one read as ~180°, producing an enormous, physically impossible
+        // angular-velocity spike — exactly what a real device test surfaced
+        // (a rotation-vector-derived peak of ~1187 rad/s from what should have
+        // been at most a few tens of rad/s). Verified numerically before and
+        // after this fix; see SensorQualityAnalyzerTest.
+        val wAbs = abs(w).coerceAtMost(1.0)
+        val angle = 2.0 * acos(wAbs)
         return if (dtSeconds > 0) angle / dtSeconds else 0.0
     }
 

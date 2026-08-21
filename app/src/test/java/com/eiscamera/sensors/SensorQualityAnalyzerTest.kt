@@ -80,6 +80,41 @@ class SensorQualityAnalyzerTest {
         assertEquals(omega, recovered, 0.01)
     }
 
+    /**
+     * Regression test for a real bug found on the OPPO F31 5G (see
+     * docs/ROADMAP.md V0.3 findings): unit quaternions have a "double
+     * cover" (q and -q represent the identical orientation), and Android's
+     * rotation-vector sensor does not guarantee a consistent sign between
+     * consecutive samples. A naive angle calculation misreads a sign flip
+     * between two nearly-identical orientations as a ~180° rotation,
+     * producing an enormous, physically impossible angular-velocity spike
+     * (observed on-device: ~1187 rad/s from what should have been a few
+     * tens of rad/s at most). This test constructs exactly that scenario —
+     * a small true rotation whose second quaternion sample is deliberately
+     * sign-flipped — and asserts the SMALL true rate is still recovered.
+     */
+    @Test
+    fun `quaternionAngularVelocityMagnitude is immune to a sign-flipped sample`() {
+        val trueAngle = 0.10 // radians — a small, physically reasonable rotation
+        val dt = 0.01 // seconds
+        val expectedOmega = trueAngle / dt // 10 rad/s
+
+        val q1 = floatArrayOf(1f, 0f, 0f, 0f) // identity
+        val q2True = floatArrayOf(
+            cos(trueAngle / 2).toFloat(), 0f, 0f, sin(trueAngle / 2).toFloat()
+        )
+        val q2Flipped = floatArrayOf(-q2True[0], -q2True[1], -q2True[2], -q2True[3])
+
+        val recoveredFromFlipped = SensorQualityAnalyzer.quaternionAngularVelocityMagnitude(q1, q2Flipped, dt)
+        val recoveredFromTrue = SensorQualityAnalyzer.quaternionAngularVelocityMagnitude(q1, q2True, dt)
+
+        assertEquals(
+            "sign-flipped sample must recover the same small rate as the non-flipped sample",
+            expectedOmega, recoveredFromFlipped, 0.01
+        )
+        assertEquals(expectedOmega, recoveredFromTrue, 0.01)
+    }
+
     // -----------------------------------------------------------------
     // Dynamic phase — end-to-end cross-correlation
     // -----------------------------------------------------------------
