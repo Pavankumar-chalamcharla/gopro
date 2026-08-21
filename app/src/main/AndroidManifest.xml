@@ -27,6 +27,16 @@
         android:name="android.hardware.camera.any"
         android:required="false" />
 
+    <!--
+        Required since Android 12 (API 31) to request sensor sampling at
+        SensorManager.SENSOR_DELAY_FASTEST (i.e. a requested period of 0
+        microseconds — "as fast as the driver will go"), which
+        SensorQualityCollector uses for the V0.3 test. This is a "normal"
+        permission — declaring it here is sufficient, no runtime request
+        dialog is shown to the user.
+    -->
+    <uses-permission android:name="android.permission.HIGH_SAMPLING_RATE_SENSORS" />
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
