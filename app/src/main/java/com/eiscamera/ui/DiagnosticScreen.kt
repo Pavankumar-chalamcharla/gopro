@@ -38,7 +38,7 @@ import com.eiscamera.sensors.SensorInfo
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DiagnosticScreen(viewModel: ScanViewModel) {
+fun DiagnosticScreen(viewModel: ScanViewModel, onRunSensorQualityTest: () -> Unit = {}) {
     val state by viewModel.state.collectAsState()
 
     Scaffold(
@@ -57,7 +57,7 @@ fun DiagnosticScreen(viewModel: ScanViewModel) {
             when (val s = state) {
                 is ScanUiState.Idle, is ScanUiState.Scanning -> ScanningIndicator()
                 is ScanUiState.Failed -> ErrorView(s.message, onRetry = { viewModel.rescan() })
-                is ScanUiState.Done -> ProfileView(s.profile, s.fromCache)
+                is ScanUiState.Done -> ProfileView(s.profile, s.fromCache, onRunSensorQualityTest)
             }
         }
     }
@@ -92,7 +92,7 @@ private fun ErrorView(message: String, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun ProfileView(profile: DeviceProfile, fromCache: Boolean) {
+private fun ProfileView(profile: DeviceProfile, fromCache: Boolean, onRunSensorQualityTest: () -> Unit) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -123,6 +123,27 @@ private fun ProfileView(profile: DeviceProfile, fromCache: Boolean) {
                 profile.capability.reasons.forEach { reason ->
                     Text("• $reason", style = MaterialTheme.typography.bodySmall)
                     Spacer(Modifier.height(4.dp))
+                }
+            }
+        }
+
+        item {
+            Button(onClick = onRunSensorQualityTest, modifier = Modifier.fillMaxWidth()) {
+                Text("Run Sensor Quality Test (V0.3)")
+            }
+        }
+
+        profile.sensorQuality?.let { q ->
+            item {
+                SectionCard(title = "Last Sensor Quality Test") {
+                    KeyValueRow("Measured rate", q.measuredRateHz?.let { "%.0f Hz".format(it) } ?: "unknown")
+                    KeyValueRow("Timestamp jitter", q.timestampJitterMs?.let { "%.3f ms".format(it) } ?: "unknown")
+                    KeyValueRow("Stationary noise (worst axis)", "%.5f rad/s".format(q.stationaryNoiseStdDevRadS))
+                    KeyValueRow("Bias magnitude", "%.5f rad/s".format(q.stationaryBiasRadS))
+                    if (q.dynamicTestAvailable && q.dynamicLagMs != null && q.dynamicCorrelation != null) {
+                        KeyValueRow("Dynamic lag vs. rotation vector", "%.0f ms".format(q.dynamicLagMs))
+                        KeyValueRow("Dynamic correlation", "%.3f".format(q.dynamicCorrelation))
+                    }
                 }
             }
         }
@@ -177,7 +198,7 @@ private fun ProfileView(profile: DeviceProfile, fromCache: Boolean) {
 }
 
 @Composable
-private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {
+internal fun SectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -227,7 +248,7 @@ private fun CameraCard(camera: CameraInfo) {
 }
 
 @Composable
-private fun KeyValueRow(key: String, value: String) {
+internal fun KeyValueRow(key: String, value: String) {
     Row(modifier = Modifier.fillMaxWidth()) {
         Text("$key: ", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
         Text(value, style = MaterialTheme.typography.bodySmall)

@@ -74,7 +74,7 @@ object CapabilityThresholds {
     const val MIN_DECLARED_GYRO_RATE_HZ_FOR_ADVANCED: Double = 200.0
 
     // -----------------------------------------------------------------
-    // SENSOR QUALITY (measured) — NOT YET APPLIED. Defined for V0.3.
+    // SENSOR QUALITY (measured) — APPLIED as of V0.3.
     // -----------------------------------------------------------------
 
     /**
@@ -82,9 +82,15 @@ object CapabilityThresholds {
      *   deviation of inter-sample time) for "reliable" gyro timestamps, per
      *   spec section 5.
      * UNITS: milliseconds.
-     * ORIGIN: Provisional. Will be replaced with a data-backed value after
-     *   collecting jitter distributions from real devices in V0.3.
-     * REQUIRES V0.3. NOT YET APPLIED.
+     * ORIGIN: Provisional. Was a placeholder pending real data; V0.3 now
+     *   supplies real measured jitter, but this threshold value itself is
+     *   still a first-principles estimate, not yet cross-validated across
+     *   multiple physical devices.
+     * STATUS: APPLIED (V0.3) — CapabilityEngine now reports a
+     *   low/high verdict against this threshold in its reasoning trail
+     *   whenever a SensorQualitySnapshot is supplied. It does NOT yet
+     *   gate the returned CapabilityLevel — see CapabilityEngine kdoc for
+     *   why Advanced+ still requires V0.4/V0.7 as well.
      */
     const val MAX_GYRO_TIMESTAMP_JITTER_MS_FOR_ADVANCED: Double = 0.5
 
@@ -94,10 +100,54 @@ object CapabilityThresholds {
      * UNITS: rad/s.
      * ORIGIN: Provisional, consistent with typical consumer MEMS gyro noise
      *   density specs (roughly 0.01-0.05 dps/sqrt(Hz)-class parts). Needs
-     *   device-specific validation.
-     * REQUIRES V0.3. NOT YET APPLIED.
+     *   device-specific validation across more than one physical unit.
+     * STATUS: APPLIED (V0.3) — same caveat as
+     *   MAX_GYRO_TIMESTAMP_JITTER_MS_FOR_ADVANCED above: informs the
+     *   reasoning trail, does not yet gate CapabilityLevel by itself.
      */
     const val MAX_GYRO_STATIONARY_STD_DEV_RAD_S: Double = 0.01
+
+    // -----------------------------------------------------------------
+    // DYNAMIC RESPONSE CROSS-CHECK (measured) — APPLIED as of V0.3.
+    // -----------------------------------------------------------------
+
+    /**
+     * MEANING: minimum normalized cross-correlation coefficient between
+     *   the gyroscope's angular-velocity magnitude and the
+     *   rotation-vector-derived angular-velocity magnitude, measured
+     *   during a deliberate motion ("flick") phase, above which the two
+     *   signals are considered to be describing "the same physical
+     *   motion" with reasonable fidelity.
+     * UNITS: dimensionless, range [-1, 1] (Pearson correlation).
+     * ORIGIN: Provisional. 0.8 is a conservative signal-processing rule
+     *   of thumb for "clearly related signals"; not yet validated against
+     *   a labeled dataset of known-real vs. known-synthetic gyroscopes.
+     * INTERPRETATION CAVEAT: high correlation is expected for BOTH a
+     *   high-quality real gyro (which rotation-vector fusion leans on
+     *   heavily as its primary input) and a synthesized gyro (which may
+     *   literally BE a smoothed derivative of that same fusion pipeline).
+     *   This threshold alone does not distinguish those two cases — see
+     *   SensorQualityAnalyzer.analyzeDynamicResponse kdoc.
+     * STATUS: APPLIED (V0.3) as an INFORMATIONAL flag in the reasoning
+     *   trail only, not as a pass/fail gate on CapabilityLevel.
+     */
+    const val MIN_DYNAMIC_CORRELATION_FOR_CONSISTENT_SIGNAL: Double = 0.8
+
+    /**
+     * MEANING: absolute lag (regardless of sign) between the gyroscope
+     *   signal and the rotation-vector-derived angular velocity, above
+     *   which the gyroscope is flagged as showing SIGNIFICANT latency
+     *   relative to the OS's own fused orientation estimate — a concern
+     *   for real-time EIS, where the entire point of using a gyro is to
+     *   react faster than a fusion filter allows.
+     * UNITS: milliseconds.
+     * ORIGIN: Provisional. One frame at 30fps is ~33ms; lag much larger
+     *   than that would already erode a meaningful fraction of any
+     *   stabilization benefit before the pipeline even exists.
+     * STATUS: APPLIED (V0.3) as an informational warning in the reasoning
+     *   trail; not yet tied to a specific capability-level gate.
+     */
+    const val MAX_DYNAMIC_LAG_MS_BEFORE_WARNING: Double = 20.0
 
     // -----------------------------------------------------------------
     // CAMERA STREAM (measured) — NOT YET APPLIED. Defined for V0.4.

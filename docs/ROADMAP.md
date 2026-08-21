@@ -8,7 +8,7 @@ before the next one starts).
 |---|---|---|
 | V0.1 | Project skeleton | **Done** — Gradle project, manifest, empty-ish MainActivity |
 | V0.2 | Device capability scanner | **Done** — sensors + cameras + processing/GPU static inventory, DeviceProfile persistence, conservative CapabilityEngine, diagnostic UI |
-| V0.3 | Sensor diagnostics | Not started — subscribe to the gyroscope, measure real sampling rate / jitter / stationary noise & bias / timestamp monotonicity, over a real collection window |
+| V0.3 | Sensor diagnostics | **Done** — stationary noise/jitter/bias measurement, plus a dynamic-response cross-check against the rotation-vector sensor (gyro-vs-fusion cross-correlation) to help detect synthesized/fused "gyroscopes" |
 | V0.4 | Camera diagnostics | Not started — open each camera, measure real sustained FPS, frame-timestamp stability, dropped frames, independently per camera id |
 | V0.5 | Gyro recorder | Not started — continuous background-thread gyro capture with a ring buffer, feeding V0.7 |
 | V0.6 | Camera recorder | Not started — CameraX or raw Camera2 capture session, live preview, CAMERA runtime permission flow |
@@ -27,21 +27,47 @@ before the next one starts).
 
 `CapabilityEngine` (see `app/src/main/java/com/eiscamera/capability/CapabilityEngine.kt`)
 is structurally incapable of returning `LEVEL_2_ADVANCED` or higher right
-now — there is no code path that produces that result — because doing so
-would require measured sensor jitter/noise (V0.3), measured camera stream
-stability (V0.4), and measured synchronization quality (V0.7), none of
-which exist yet. Extending the engine to reach higher levels means adding
-real measurements first, not loosening the existing thresholds.
+now — there is no code path that produces that result — even though V0.3
+now supplies real measured sensor quality data. Reaching Advanced+ also
+requires measured camera stream stability (V0.4) and measured
+synchronization quality (V0.7), neither of which exist yet. V0.3 makes the
+engine's *reasoning* evidence-based; it deliberately does not yet change
+the returned *level*.
 
-## What schema/architecture changes are expected next (V0.3)
+## V0.3 real-device finding (OPPO F31 5G / CPH2781)
 
-- `DeviceProfile.SCHEMA_VERSION` will bump to 2 when a `sensorQuality`
-  section (measured rate, jitter, stddev noise, bias, timestamp gaps) is
-  added.
+The first real run on the validation device surfaced something the V0.2
+static scan alone couldn't: the device's `Sensor.TYPE_GYROSCOPE` is named
+`oem-pseudo-gyro`, vendor `virtual_gyro` — i.e. not a genuine gyroscope
+chip, almost certainly a MediaTek sensor-HAL fusion of the real
+accelerometer (`sc7a20`, Silan) and magnetometer (`mmc5603`, Memsic). The
+V0.3 dynamic-response cross-check (gyro vs. rotation-vector-derived
+angular velocity) exists specifically to surface evidence for this kind of
+case — see the interpretation caveat in
+`SensorQualityAnalyzer.analyzeDynamicResponse` kdoc for what that
+cross-check can and cannot prove on its own.
+
+## What schema/architecture changed in V0.3
+
+- `DeviceProfile.SCHEMA_VERSION` bumped 1 -> 2, adding a nullable
+  `sensorQuality: SensorQualitySnapshot?` field. Old cached (v1) profiles
+  are automatically discarded and rescanned by the existing
+  `DeviceProfileRepository` schema-version check — no migration code
+  needed.
 - `CapabilityThresholds.MAX_GYRO_TIMESTAMP_JITTER_MS_FOR_ADVANCED` and
-  `MAX_GYRO_STATIONARY_STD_DEV_RAD_S` move from "documented but unused" to
-  "applied," with real device data backing the chosen values instead of the
-  provisional estimates in place today.
-- A `sensors/SensorQualityTest.kt` component will own the actual
-  SensorEventListener subscription, stationary-noise measurement window,
-  and jitter computation described in spec section 5.
+  `MAX_GYRO_STATIONARY_STD_DEV_RAD_S` moved from "documented but unused" to
+  "applied" (informs `CapabilityEngine` reasoning; does not yet gate the
+  returned level). Two new thresholds
+  (`MIN_DYNAMIC_CORRELATION_FOR_CONSISTENT_SIGNAL`,
+  `MAX_DYNAMIC_LAG_MS_BEFORE_WARNING`) were added for the dynamic test.
+- New `sensors/SensorQualityAnalyzer.kt` (pure math, unit tested),
+  `sensors/SensorQualityCollector.kt` (Android SensorEventListener
+  wrapper), and a new `ui/SensorQualityScreen.kt` two-phase guided flow,
+  reachable from the main diagnostic screen.
+
+## What's next (V0.4)
+
+Camera stream quality test: open each camera (not just read static
+CameraCharacteristics), measure actual sustained FPS, frame-timestamp
+stability, and dropped frames — independently per camera id, per spec
+section 6.
