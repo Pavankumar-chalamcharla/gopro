@@ -118,6 +118,7 @@ class SensorQualityViewModel(application: Application) : AndroidViewModel(applic
                         cameras = profile.cameras,
                         processing = profile.processing,
                         sensorQuality = snapshot,
+                        cameraQuality = profile.cameraQuality,
                     )
                 }
 

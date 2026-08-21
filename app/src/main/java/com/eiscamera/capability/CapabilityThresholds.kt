@@ -150,7 +150,7 @@ object CapabilityThresholds {
     const val MAX_DYNAMIC_LAG_MS_BEFORE_WARNING: Double = 20.0
 
     // -----------------------------------------------------------------
-    // CAMERA STREAM (measured) — NOT YET APPLIED. Defined for V0.4.
+    // CAMERA STREAM (measured) — APPLIED as of V0.4.
     // -----------------------------------------------------------------
 
     /**
@@ -160,9 +160,33 @@ object CapabilityThresholds {
      *   stabilization stage can fix.
      * UNITS: fps.
      * ORIGIN: Provisional; a commonly cited floor for a fluid preview.
-     * REQUIRES V0.4. NOT YET APPLIED.
+     * STATUS: APPLIED (V0.4) — CapabilityEngine now reports a meets/below
+     *   verdict against this threshold per camera tested, in the
+     *   reasoning trail. Does not yet gate the returned CapabilityLevel.
      */
     const val MIN_MEASURED_CAMERA_FPS_FOR_BASIC: Double = 24.0
+
+    /**
+     * MEANING: Max allowed measured frame-interval jitter (standard
+     *   deviation of inter-frame timestamp spacing) for a camera stream
+     *   considered stable enough for Advanced EIS.
+     * UNITS: milliseconds.
+     * ORIGIN: Provisional; roughly 1/10th of a frame period at 30fps.
+     * STATUS: APPLIED (V0.4) as an informational verdict in the reasoning
+     *   trail; not yet a level-gating threshold.
+     */
+    const val MAX_CAMERA_FRAME_JITTER_MS_FOR_ADVANCED: Double = 3.0
+
+    /**
+     * MEANING: Fraction of frame intervals flagged as "likely dropped"
+     *   (see CameraStreamQualityAnalyzer's interval-outlier heuristic)
+     *   above which the stream is flagged as unreliable.
+     * UNITS: dimensionless fraction (0.0-1.0).
+     * ORIGIN: Provisional — more than 1 in 20 frames flagged is a
+     *   reasonable "something's wrong" threshold to start with.
+     * STATUS: APPLIED (V0.4) as an informational warning.
+     */
+    const val MAX_LIKELY_DROPPED_FRAME_RATIO: Double = 0.05
 
     // -----------------------------------------------------------------
     // SYNCHRONIZATION (measured) — NOT YET APPLIED. Defined for V0.7.

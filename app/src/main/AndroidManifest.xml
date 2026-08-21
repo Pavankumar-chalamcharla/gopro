@@ -2,13 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-        V0.2 note: no CAMERA runtime permission is requested yet.
-        This build only reads static CameraCharacteristics via
-        CameraManager#getCameraCharacteristics(), which Android does NOT
-        gate behind the CAMERA permission (only opening a capture session
-        does). The CAMERA permission — with proper runtime request/denial
-        handling — will be added starting at V0.6 (camera recorder / live
-        preview). See docs/ROADMAP.md.
+        V0.2-V0.3: no CAMERA runtime permission was needed (only static
+        CameraCharacteristics were read). V0.4 adds the Camera Stream
+        Quality Test, which actually opens a camera device to measure real
+        frame timing — that DOES require this dangerous permission,
+        requested at runtime by CameraQualityScreen (not just declared
+        here). No image data is ever saved or displayed by that test.
 
         All hardware <uses-feature> below are android:required="false" on
         purpose: this app must remain installable on devices that lack a
@@ -17,6 +16,7 @@
         rejection (spec section 3, LEVEL 0).
     -->
 
+    <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature
         android:name="android.hardware.sensor.gyroscope"
         android:required="false" />

@@ -9,7 +9,7 @@ before the next one starts).
 | V0.1 | Project skeleton | **Done** — Gradle project, manifest, empty-ish MainActivity |
 | V0.2 | Device capability scanner | **Done** — sensors + cameras + processing/GPU static inventory, DeviceProfile persistence, conservative CapabilityEngine, diagnostic UI |
 | V0.3 | Sensor diagnostics | **Done** — stationary noise/jitter/bias measurement, plus a dynamic-response cross-check against the rotation-vector sensor (gyro-vs-fusion cross-correlation) to help detect synthesized/fused "gyroscopes" |
-| V0.4 | Camera diagnostics | Not started — open each camera, measure real sustained FPS, frame-timestamp stability, dropped frames, independently per camera id |
+| V0.4 | Camera diagnostics | **Done** — opens each camera (real Camera2 capture session, not just static characteristics), measures actual sustained FPS, frame-interval jitter, and a likely-dropped-frame heuristic, independently per camera id |
 | V0.5 | Gyro recorder | Not started — continuous background-thread gyro capture with a ring buffer, feeding V0.7 |
 | V0.6 | Camera recorder | Not started — CameraX or raw Camera2 capture session, live preview, CAMERA runtime permission flow |
 | V0.7 | Camera/gyro synchronization | Not started — timestamp domain reconciliation, offset/drift estimation, interpolation at arbitrary camera timestamps |
@@ -112,9 +112,31 @@ its own. Real sensor data did.
   wrapper), and a new `ui/SensorQualityScreen.kt` two-phase guided flow,
   reachable from the main diagnostic screen.
 
-## What's next (V0.4)
+## What schema/architecture changed in V0.4
 
-Camera stream quality test: open each camera (not just read static
-CameraCharacteristics), measure actual sustained FPS, frame-timestamp
-stability, and dropped frames — independently per camera id, per spec
-section 6.
+- `DeviceProfile.SCHEMA_VERSION` bumped 2 -> 3, adding
+  `cameraQuality: List<CameraStreamQualitySnapshot>` (a list, not a single
+  value — each camera is tested and reported independently).
+- `CapabilityThresholds.MIN_MEASURED_CAMERA_FPS_FOR_BASIC` moved from
+  "documented but unused" to "applied." Two new thresholds
+  (`MAX_CAMERA_FRAME_JITTER_MS_FOR_ADVANCED`,
+  `MAX_LIKELY_DROPPED_FRAME_RATIO`) were added.
+- New `camera/CameraStreamQualityAnalyzer.kt` (pure math, unit tested),
+  `camera/CameraStreamQualityCollector.kt` (real Camera2 capture session —
+  opens the camera, runs a repeating request, records CaptureResult timing
+  metadata, tears everything down safely), and `ui/CameraQualityScreen.kt`
+  (runtime CAMERA permission request + camera picker + countdown + results).
+- `AndroidManifest.xml` now declares `android.permission.CAMERA`, requested
+  at runtime by that screen — the first dangerous permission this project
+  needs.
+
+## What's next (V0.5 / V0.7)
+
+The roadmap's original V0.5 (gyro recorder) and V0.6 (camera recorder) are
+largely superseded by what V0.3 and V0.4 already built — both sensors can
+already be opened and timed. The next genuinely new capability is
+**V0.7: gyro-camera synchronization** — reconciling the two independent
+timestamp domains (camera SENSOR_TIMESTAMP vs. gyro sensor timestamps) into
+one interpolation function that can estimate device orientation at an
+arbitrary camera frame time (spec section 7). That's the last measurement
+needed before Advanced+ capability levels become reachable at all.

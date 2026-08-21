@@ -38,7 +38,11 @@ import com.eiscamera.sensors.SensorInfo
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DiagnosticScreen(viewModel: ScanViewModel, onRunSensorQualityTest: () -> Unit = {}) {
+fun DiagnosticScreen(
+    viewModel: ScanViewModel,
+    onRunSensorQualityTest: () -> Unit = {},
+    onRunCameraQualityTest: () -> Unit = {},
+) {
     val state by viewModel.state.collectAsState()
 
     Scaffold(
@@ -57,7 +61,7 @@ fun DiagnosticScreen(viewModel: ScanViewModel, onRunSensorQualityTest: () -> Uni
             when (val s = state) {
                 is ScanUiState.Idle, is ScanUiState.Scanning -> ScanningIndicator()
                 is ScanUiState.Failed -> ErrorView(s.message, onRetry = { viewModel.rescan() })
-                is ScanUiState.Done -> ProfileView(s.profile, s.fromCache, onRunSensorQualityTest)
+                is ScanUiState.Done -> ProfileView(s.profile, s.fromCache, onRunSensorQualityTest, onRunCameraQualityTest)
             }
         }
     }
@@ -92,7 +96,12 @@ private fun ErrorView(message: String, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun ProfileView(profile: DeviceProfile, fromCache: Boolean, onRunSensorQualityTest: () -> Unit) {
+private fun ProfileView(
+    profile: DeviceProfile,
+    fromCache: Boolean,
+    onRunSensorQualityTest: () -> Unit,
+    onRunCameraQualityTest: () -> Unit,
+) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -133,6 +142,12 @@ private fun ProfileView(profile: DeviceProfile, fromCache: Boolean, onRunSensorQ
             }
         }
 
+        item {
+            Button(onClick = onRunCameraQualityTest, modifier = Modifier.fillMaxWidth()) {
+                Text("Run Camera Quality Test (V0.4)")
+            }
+        }
+
         profile.sensorQuality?.let { q ->
             item {
                 SectionCard(title = "Last Sensor Quality Test") {
@@ -143,6 +158,20 @@ private fun ProfileView(profile: DeviceProfile, fromCache: Boolean, onRunSensorQ
                     if (q.dynamicTestAvailable && q.dynamicLagMs != null && q.dynamicCorrelation != null) {
                         KeyValueRow("Dynamic lag vs. rotation vector", "%.0f ms".format(q.dynamicLagMs))
                         KeyValueRow("Dynamic correlation", "%.3f".format(q.dynamicCorrelation))
+                    }
+                }
+            }
+        }
+
+        if (profile.cameraQuality.isNotEmpty()) {
+            item {
+                SectionCard(title = "Last Camera Quality Tests") {
+                    profile.cameraQuality.forEach { cq ->
+                        Text("Camera ${cq.cameraId}", fontWeight = FontWeight.Bold)
+                        KeyValueRow("Measured FPS", cq.measuredFps?.let { "%.1f".format(it) } ?: "unknown")
+                        KeyValueRow("Jitter", cq.frameIntervalJitterMs?.let { "%.3f ms".format(it) } ?: "unknown")
+                        KeyValueRow("Likely dropped frames", cq.likelyDroppedFrames.toString())
+                        Spacer(Modifier.height(8.dp))
                     }
                 }
             }

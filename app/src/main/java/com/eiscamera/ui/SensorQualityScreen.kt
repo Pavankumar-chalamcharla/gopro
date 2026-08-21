@@ -96,7 +96,7 @@ private fun InstructionCard(title: String, body: String, buttonText: String, onS
 }
 
 @Composable
-private fun CountdownCard(message: String, secondsRemaining: Int) {
+internal fun CountdownCard(message: String, secondsRemaining: Int) {
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -109,7 +109,7 @@ private fun CountdownCard(message: String, secondsRemaining: Int) {
 }
 
 @Composable
-private fun LoadingCard(message: String) {
+internal fun LoadingCard(message: String) {
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -122,7 +122,7 @@ private fun LoadingCard(message: String) {
 }
 
 @Composable
-private fun FailedCard(message: String, onRetry: () -> Unit) {
+internal fun FailedCard(message: String, onRetry: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,

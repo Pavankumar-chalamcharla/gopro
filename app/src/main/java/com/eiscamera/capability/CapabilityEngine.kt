@@ -2,6 +2,7 @@ package com.eiscamera.capability
 
 import android.hardware.Sensor
 import com.eiscamera.camera.CameraInfo
+import com.eiscamera.camera.CameraStreamQualitySnapshot
 import com.eiscamera.processing.ProcessingInfo
 import com.eiscamera.sensors.SensorInfo
 import com.eiscamera.sensors.SensorQualitySnapshot
@@ -41,6 +42,7 @@ class CapabilityEngine {
         cameras: List<CameraInfo>,
         processing: ProcessingInfo,
         sensorQuality: SensorQualitySnapshot? = null,
+        cameraQuality: List<CameraStreamQualitySnapshot> = emptyList(),
     ): CapabilityResult {
         val reasons = mutableListOf<String>()
 
@@ -109,17 +111,74 @@ class CapabilityEngine {
 
         if (sensorQuality != null) {
             reasons += measuredSensorQualityReasoning(sensorQuality)
-            reasons += "NOTE: Sensor quality has now been MEASURED (V0.3), but camera-stream " +
-                "quality (V0.4) and gyro-camera synchronization (V0.7) have not. Confirmed " +
-                "classification — and any level above Basic — still requires those too."
+        }
+        if (cameraQuality.isNotEmpty()) {
+            reasons += measuredCameraQualityReasoning(cameraQuality)
+        }
+
+        val measuredParts = mutableListOf<String>()
+        if (sensorQuality != null) measuredParts += "sensor quality (V0.3)"
+        if (cameraQuality.isNotEmpty()) measuredParts += "camera-stream quality (V0.4)"
+
+        reasons += if (measuredParts.isEmpty()) {
+            "NOTE: This is a PROVISIONAL classification from static capability scanning only. " +
+                "No sensor-quality test, camera-stream quality test, or gyro-camera synchronization " +
+                "test has run yet. Confirmed classification — and any level above Basic — requires " +
+                "those measurements."
         } else {
-            reasons += "NOTE: This is a PROVISIONAL classification from static capability " +
-                "scanning only. No sensor-quality test (jitter/noise/bias), camera-stream " +
-                "quality test, or gyro-camera synchronization test has run yet. Confirmed " +
-                "classification — and any level above Basic — requires those measurements."
+            val verb = if (measuredParts.size > 1) "have" else "has"
+            "NOTE: ${measuredParts.joinToString(" and ")} $verb now been MEASURED, but " +
+                "gyro-camera synchronization (V0.7) has not. Confirmed classification — and any " +
+                "level above Basic — still requires that too."
         }
 
         return CapabilityResult(CapabilityLevel.LEVEL_1_BASIC, reasons, fullyEvidenced = false)
+    }
+
+    /**
+     * Turns a V0.4 CameraStreamQualitySnapshot list into documented
+     * reasoning lines, one camera at a time (spec section 6: evaluate
+     * cameras independently). Does NOT change the returned CapabilityLevel
+     * — see classify() kdoc for why Advanced+ still requires V0.7 too.
+     */
+    private fun measuredCameraQualityReasoning(snapshots: List<CameraStreamQualitySnapshot>): List<String> {
+        val lines = mutableListOf<String>()
+        for (s in snapshots) {
+            lines += "MEASURED (camera ${s.cameraId}): ${s.frameCount} frames captured over the test " +
+                "window; measured FPS=${s.measuredFps?.let { "%.1f".format(it) } ?: "unknown"}, " +
+                "jitter=${s.frameIntervalJitterMs?.let { "%.3f ms".format(it) } ?: "unknown"}, " +
+                "likely dropped=${s.likelyDroppedFrames} (ESTIMATED via interval-outlier heuristic, " +
+                "not a platform-guaranteed count)."
+
+            s.measuredFps?.let { fps ->
+                val verdict = if (fps >= CapabilityThresholds.MIN_MEASURED_CAMERA_FPS_FOR_BASIC) {
+                    "meets"
+                } else {
+                    "is BELOW"
+                }
+                lines += "MEASURED (camera ${s.cameraId}): sustained FPS $verdict the " +
+                    "${CapabilityThresholds.MIN_MEASURED_CAMERA_FPS_FOR_BASIC} fps floor for Basic EIS."
+            }
+
+            s.frameIntervalJitterMs?.let { jitter ->
+                if (jitter > CapabilityThresholds.MAX_CAMERA_FRAME_JITTER_MS_FOR_ADVANCED) {
+                    lines += "NOTE (camera ${s.cameraId}): frame-interval jitter exceeds " +
+                        "MAX_CAMERA_FRAME_JITTER_MS_FOR_ADVANCED " +
+                        "(${CapabilityThresholds.MAX_CAMERA_FRAME_JITTER_MS_FOR_ADVANCED} ms)."
+                }
+            }
+
+            if (s.frameCount > 0) {
+                val droppedRatio = s.likelyDroppedFrames.toDouble() / s.frameCount
+                if (droppedRatio > CapabilityThresholds.MAX_LIKELY_DROPPED_FRAME_RATIO) {
+                    lines += "WARNING (camera ${s.cameraId}): likely-dropped-frame ratio " +
+                        "(${"%.1f".format(droppedRatio * 100)}%) exceeds " +
+                        "MAX_LIKELY_DROPPED_FRAME_RATIO " +
+                        "(${(CapabilityThresholds.MAX_LIKELY_DROPPED_FRAME_RATIO * 100).toInt()}%)."
+                }
+            }
+        }
+        return lines
     }
 
     /**
