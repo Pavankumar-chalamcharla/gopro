@@ -2,8 +2,11 @@ package com.eiscamera.capability
 
 import android.hardware.Sensor
 import com.eiscamera.camera.CameraInfo
+import com.eiscamera.camera.CameraStreamQualitySnapshot
 import com.eiscamera.processing.ProcessingInfo
 import com.eiscamera.sensors.SensorInfo
+import com.eiscamera.sensors.SensorQualitySnapshot
+import com.eiscamera.synchronization.SyncResultSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -57,6 +60,7 @@ class CapabilityEngineTest {
         isLogicalMultiCamera = false,
         physicalCameraIds = emptyList(),
         capabilities = emptyList(),
+        timestampSource = "REALTIME",
     )
 
     private fun processing(cores: Int = 8, eglOk: Boolean = true) = ProcessingInfo(
@@ -78,6 +82,47 @@ class CapabilityEngineTest {
         glExtensions = emptyList(),
         eglQuerySucceeded = eglOk,
         hardwareVideoEncoders = emptyList(),
+    )
+
+    private fun goodSensorQuality() = SensorQualitySnapshot(
+        testTimestampMs = 0L,
+        stationarySampleCount = 1000,
+        measuredRateHz = 400.0,
+        timestampJitterMs = 0.1,
+        timestampMonotonic = true,
+        stationaryNoiseStdDevRadS = 0.001,
+        stationaryBiasRadS = 0.0001,
+        biasXRadS = 0.00005,
+        biasYRadS = -0.00003,
+        biasZRadS = 0.00008,
+        dynamicTestAvailable = true,
+        dynamicLagMs = 2.0,
+        dynamicCorrelation = 0.9,
+        dynamicGyroPeakRadS = 5.0,
+        dynamicRotationVectorPeakRadS = 5.1,
+    )
+
+    private fun goodCameraQuality() = CameraStreamQualitySnapshot(
+        cameraId = "0",
+        testTimestampMs = 0L,
+        frameCount = 150,
+        measuredFps = 30.0,
+        frameIntervalJitterMs = 0.2,
+        minIntervalMs = 33.0,
+        maxIntervalMs = 33.5,
+        likelyDroppedFrames = 0,
+        meanExposureTimeNs = 8_000_000.0,
+        meanFrameDurationNs = 33_000_000.0,
+    )
+
+    private fun goodSyncResult() = SyncResultSnapshot(
+        cameraId = "0",
+        testTimestampMs = 0L,
+        cameraTimestampSource = "REALTIME",
+        gyroSampleCount = 1000,
+        cameraFrameCount = 150,
+        estimatedOffsetMs = 5.0,
+        correlation = 0.9,
     )
 
     @Test
@@ -156,5 +201,68 @@ class CapabilityEngineTest {
             processing = processing(cores = 8, eglOk = true),
         )
         assertTrue(result.level.ordinal <= CapabilityLevel.LEVEL_1_BASIC.ordinal)
+    }
+
+    @Test
+    fun `all three measurements present and passing yields ADVANCED with full evidence`() {
+        val result = engine.classify(
+            sensors = listOf(gyro()),
+            missingCriticalSensors = emptyList(),
+            cameras = listOf(camera()),
+            processing = processing(),
+            sensorQuality = goodSensorQuality(),
+            cameraQuality = listOf(goodCameraQuality()),
+            syncResult = goodSyncResult(),
+        )
+        assertEquals(CapabilityLevel.LEVEL_2_ADVANCED, result.level)
+        assertTrue(result.fullyEvidenced)
+    }
+
+    @Test
+    fun `all three measurements present but one fails its threshold stays at BASIC`() {
+        // Same as the passing case, but sync correlation is too low to trust.
+        val badSync = goodSyncResult().copy(correlation = 0.1)
+        val result = engine.classify(
+            sensors = listOf(gyro()),
+            missingCriticalSensors = emptyList(),
+            cameras = listOf(camera()),
+            processing = processing(),
+            sensorQuality = goodSensorQuality(),
+            cameraQuality = listOf(goodCameraQuality()),
+            syncResult = badSync,
+        )
+        assertEquals(CapabilityLevel.LEVEL_1_BASIC, result.level)
+        assertTrue(!result.fullyEvidenced)
+        assertTrue(result.reasons.any { it.contains("correlation was too low", ignoreCase = true) })
+    }
+
+    @Test
+    fun `two of three measurements present still stays at BASIC`() {
+        val result = engine.classify(
+            sensors = listOf(gyro()),
+            missingCriticalSensors = emptyList(),
+            cameras = listOf(camera()),
+            processing = processing(),
+            sensorQuality = goodSensorQuality(),
+            cameraQuality = listOf(goodCameraQuality()),
+            syncResult = null,
+        )
+        assertEquals(CapabilityLevel.LEVEL_1_BASIC, result.level)
+        assertTrue(result.reasons.any { it.contains("synchronization", ignoreCase = true) })
+    }
+
+    @Test
+    fun `high gyro noise blocks ADVANCED even when everything else passes`() {
+        val noisySensorQuality = goodSensorQuality().copy(stationaryNoiseStdDevRadS = 0.05)
+        val result = engine.classify(
+            sensors = listOf(gyro()),
+            missingCriticalSensors = emptyList(),
+            cameras = listOf(camera()),
+            processing = processing(),
+            sensorQuality = noisySensorQuality,
+            cameraQuality = listOf(goodCameraQuality()),
+            syncResult = goodSyncResult(),
+        )
+        assertEquals(CapabilityLevel.LEVEL_1_BASIC, result.level)
     }
 }

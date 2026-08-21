@@ -10,10 +10,10 @@ before the next one starts).
 | V0.2 | Device capability scanner | **Done** — sensors + cameras + processing/GPU static inventory, DeviceProfile persistence, conservative CapabilityEngine, diagnostic UI |
 | V0.3 | Sensor diagnostics | **Done** — stationary noise/jitter/bias measurement, plus a dynamic-response cross-check against the rotation-vector sensor (gyro-vs-fusion cross-correlation) to help detect synthesized/fused "gyroscopes" |
 | V0.4 | Camera diagnostics | **Done** — opens each camera (real Camera2 capture session, not just static characteristics), measures actual sustained FPS, frame-interval jitter, and a likely-dropped-frame heuristic, independently per camera id |
-| V0.5 | Gyro recorder | Not started — continuous background-thread gyro capture with a ring buffer, feeding V0.7 |
-| V0.6 | Camera recorder | Not started — CameraX or raw Camera2 capture session, live preview, CAMERA runtime permission flow |
-| V0.7 | Camera/gyro synchronization | Not started — timestamp domain reconciliation, offset/drift estimation, interpolation at arbitrary camera timestamps |
-| V0.8 | Orientation estimation | Not started — quaternion integration of angular velocity |
+| V0.5 | Gyro recorder | Superseded by V0.3's collector + V0.7's concurrent collector — no separate stage needed |
+| V0.6 | Camera recorder | Superseded by V0.4's real capture session + V0.7's concurrent collector — no separate stage needed |
+| V0.7 | Camera/gyro synchronization | **Done** — empirical clock-offset estimation (gyro angular velocity vs. camera motion-energy cross-correlation, robust to unrelated clock epochs) and SLERP-based orientation interpolation at arbitrary camera timestamps |
+| V0.8 | Orientation estimation | **Done** — quaternion exponential-map integration of raw angular velocity, plus an empirical on-device drift measurement against the rotation-vector reference (with automatic bias correction from V0.3 when available) |
 | V0.9 | Motion filtering | Not started — high-frequency vs. low-frequency motion separation |
 | V1.0 | Basic real-time EIS | Not started — first end-to-end stabilized preview |
 | V1.1 | GPU EIS | Not started — OpenGL ES/EGL shader-based warp, replacing any CPU path |
@@ -130,13 +130,74 @@ its own. Real sensor data did.
   at runtime by that screen — the first dangerous permission this project
   needs.
 
-## What's next (V0.5 / V0.7)
+## What V0.7 added
 
-The roadmap's original V0.5 (gyro recorder) and V0.6 (camera recorder) are
-largely superseded by what V0.3 and V0.4 already built — both sensors can
-already be opened and timed. The next genuinely new capability is
-**V0.7: gyro-camera synchronization** — reconciling the two independent
-timestamp domains (camera SENSOR_TIMESTAMP vs. gyro sensor timestamps) into
-one interpolation function that can estimate device orientation at an
-arbitrary camera frame time (spec section 7). That's the last measurement
-needed before Advanced+ capability levels become reachable at all.
+- `motion/TimeSeriesCorrelation.kt` — the interpolation/cross-correlation
+  math from V0.3 was pulled out into a shared, reused module rather than
+  duplicated (see the V0.3 quaternion double-cover bug entry above for why
+  duplicated math is worth avoiding).
+- `synchronization/SyncAnalyzer.kt` — estimates the gyro<->camera clock
+  offset by cross-correlating gyro angular velocity against a camera
+  frame-to-frame "motion energy" signal, deliberately reframed to each
+  series' own relative start time so it stays correct even when the two
+  clocks share no epoch at all (verified numerically against synthetic
+  data with an artificial ~488-second epoch difference before being coded
+  in Kotlin — see SyncAnalyzerTest). Also provides SLERP-based orientation
+  interpolation between rotation-vector samples at an arbitrary camera
+  timestamp — the actual "estimate orientation at arbitrary camera
+  timestamps" mechanism spec section 7 asks for.
+- `synchronization/CameraMotionCollector.kt` — the first collector that
+  runs gyro AND camera concurrently, and the first to read actual pixel
+  data (Y/luma plane only, coarsely downsampled) to build a motion signal.
+- `CameraInfo.timestampSource` (V0.2 addition) — reads
+  SENSOR_INFO_TIMESTAMP_SOURCE, so the app knows definitively whether a
+  camera's clock is platform-guaranteed to match the gyro's or not.
+- `DeviceProfile.SCHEMA_VERSION` bumped 3 -> 4, adding `syncResult`.
+- **CapabilityEngine can now return LEVEL_2_ADVANCED** — the first time
+  any level above Basic has been reachable. This requires ALL THREE of
+  V0.3, V0.4, and V0.7 to be present AND every one of their thresholds to
+  pass independently (jitter, noise, camera FPS/jitter, sync correlation/
+  offset) — no partial credit, no averaging. See `advancedEligibility()`
+  in CapabilityEngine.kt for the exact, documented gate, and
+  CapabilityEngineTest for cases proving a single failing measurement
+  still keeps the result at Basic.
+
+## What V0.8 added
+
+- `orientation/GyroIntegrator.kt` — quaternion exponential-map integration
+  of angular velocity (verified numerically to be EXACT for constant
+  angular velocity, at any step count, before being written in Kotlin —
+  see the project's math verification notes and GyroIntegratorTest).
+- `orientation/OrientationDriftAnalyzer.kt` — chains the integrator across
+  a real gyro sample stream and empirically compares the result against
+  the rotation-vector reference orientation at the end of the window,
+  reporting a genuine "drift over N seconds" number for THIS device's
+  actual gyro. Automatically applies bias correction using V0.3's already-
+  measured per-axis stationary bias, if available.
+- `SensorQualitySnapshot` gained `biasXRadS`/`biasYRadS`/`biasZRadS` —
+  the per-axis bias vector was already computed in V0.3's analyzer but
+  only the scalar MAGNITUDE was persisted; direction is required to
+  actually subtract a bias from a 3-vector, so V0.8 needed the full
+  per-axis values.
+- `DeviceProfile.SCHEMA_VERSION` bumped 4 -> 5, adding `orientationDrift`.
+- `ui/OrientationDriftScreen.kt` reuses V0.3's `SensorQualityCollector`
+  as-is (it already gathers gyro + rotation-vector concurrently) rather
+  than duplicating a collector.
+- CapabilityEngine gained an informational drift reasoning line, but
+  **orientation drift deliberately does NOT feed the Advanced-level
+  gate** — that gate is scoped around the three measurements (V0.3/V0.4/
+  V0.7) that answer "can this device do gyro-based EIS at all"; drift is
+  a property of the integration pipeline built on top of that answer, not
+  a new input to it. See CapabilityEngine kdoc.
+
+## What's next (V0.9 / V1.0)
+
+With V0.2 through V0.8 built, every purely-measurement stage in the
+original roadmap is done: capability scanning, sensor quality, camera
+quality, synchronization, and orientation estimation. The next milestone
+is the first one that isn't primarily about measurement —
+**V0.9: Motion filtering** — separating high-frequency unwanted movement
+(hand shake, vibration) from low-frequency intentional movement (panning,
+following a subject) in the integrated orientation stream (spec section
+12). That's the last building block before **V1.0: Basic real-time EIS**,
+the project's first actual stabilized preview.

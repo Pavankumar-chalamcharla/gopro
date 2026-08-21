@@ -3,36 +3,33 @@ package com.eiscamera.capability
 import android.hardware.Sensor
 import com.eiscamera.camera.CameraInfo
 import com.eiscamera.camera.CameraStreamQualitySnapshot
+import com.eiscamera.orientation.OrientationDriftSnapshot
 import com.eiscamera.processing.ProcessingInfo
 import com.eiscamera.sensors.SensorInfo
 import com.eiscamera.sensors.SensorQualitySnapshot
+import com.eiscamera.synchronization.SyncResultSnapshot
 
 /**
  * Converts raw device measurements into a stabilization [CapabilityResult].
  *
  * IMPORTANT — read before extending this class:
  *
- * At V0.2, the only data available is a STATIC capability scan:
- *   - which sensors exist, and what rate they DECLARE (not measured)
- *   - static Camera2 characteristics (not measured stream behavior)
- *   - a static processing/GPU inventory (not a performance benchmark)
+ * At V0.2, the only data available was a STATIC capability scan (declared
+ * sensor/camera characteristics, no real measurement). V0.3 added measured
+ * sensor quality, V0.4 added measured camera-stream quality, and V0.7 (this
+ * version) adds an estimated gyro<->camera clock offset. With all three
+ * optional measurements present AND passing their thresholds, this engine
+ * can now return LEVEL_2_ADVANCED — see [advancedEligibility] for the exact,
+ * documented gate. Without all three (or if any fails its threshold), it
+ * still returns LEVEL_1_BASIC, same as before.
  *
- * None of the following exist yet, and this engine must not pretend they do:
- *   - measured gyro sampling rate / jitter / noise / bias      (V0.3)
- *   - measured camera stream FPS stability                     (V0.4)
- *   - gyro<->camera timestamp synchronization quality           (V0.7)
- *   - actual GPU/CPU sustained processing performance           (perf test)
- *
- * Therefore this engine can only ever return, at V0.2:
- *   UNSUPPORTED                  — when a hard requirement is provably absent
- *   LEVEL_1_BASIC (provisional)  — when nothing rules it out, but with
- *                                    fullyEvidenced = false
- *
- * It must NEVER return LEVEL_2/3/4 at V0.2, because those require measured
- * evidence this build does not yet collect (spec section 42: "no false
- * claims"). Once V0.3/V0.4/V0.7 land, this file must be EXTENDED — not by
- * loosening what LEVEL_1_BASIC means, but by adding real MEASURED evidence
- * that can justify higher levels.
+ * It must NEVER return LEVEL_3/4 — rolling-shutter compensation and full
+ * stabilization need lens-profile and rolling-shutter-readout data this
+ * project hasn't built yet (roadmap V1.3+). And it must never return
+ * LEVEL_2_ADVANCED without ALL THREE measurements passing their documented
+ * thresholds (spec section 42: "no false claims") — a device that's only
+ * been through V0.2's static scan, or only some of V0.3/V0.4/V0.7, always
+ * stays at Basic/provisional, exactly as before.
  */
 class CapabilityEngine {
 
@@ -43,6 +40,8 @@ class CapabilityEngine {
         processing: ProcessingInfo,
         sensorQuality: SensorQualitySnapshot? = null,
         cameraQuality: List<CameraStreamQualitySnapshot> = emptyList(),
+        syncResult: SyncResultSnapshot? = null,
+        orientationDrift: OrientationDriftSnapshot? = null,
     ): CapabilityResult {
         val reasons = mutableListOf<String>()
 
@@ -115,31 +114,160 @@ class CapabilityEngine {
         if (cameraQuality.isNotEmpty()) {
             reasons += measuredCameraQualityReasoning(cameraQuality)
         }
+        if (syncResult != null) {
+            reasons += measuredSyncReasoning(syncResult)
+        }
+        if (orientationDrift != null) {
+            reasons += measuredOrientationDriftReasoning(orientationDrift)
+        }
 
         val measuredParts = mutableListOf<String>()
         if (sensorQuality != null) measuredParts += "sensor quality (V0.3)"
         if (cameraQuality.isNotEmpty()) measuredParts += "camera-stream quality (V0.4)"
+        if (syncResult != null) measuredParts += "gyro-camera synchronization (V0.7)"
 
-        reasons += if (measuredParts.isEmpty()) {
-            "NOTE: This is a PROVISIONAL classification from static capability scanning only. " +
-                "No sensor-quality test, camera-stream quality test, or gyro-camera synchronization " +
-                "test has run yet. Confirmed classification — and any level above Basic — requires " +
-                "those measurements."
-        } else {
-            val verb = if (measuredParts.size > 1) "have" else "has"
-            "NOTE: ${measuredParts.joinToString(" and ")} $verb now been MEASURED, but " +
-                "gyro-camera synchronization (V0.7) has not. Confirmed classification — and any " +
-                "level above Basic — still requires that too."
+        val eligibility = advancedEligibility(sensorQuality, cameraQuality, syncResult)
+
+        reasons += when {
+            measuredParts.isEmpty() ->
+                "NOTE: This is a PROVISIONAL classification from static capability scanning only. " +
+                    "No sensor-quality test, camera-stream quality test, or gyro-camera synchronization " +
+                    "test has run yet. Confirmed classification — and any level above Basic — requires " +
+                    "those measurements."
+            measuredParts.size < 3 -> {
+                val missing = listOf("sensor quality (V0.3)", "camera-stream quality (V0.4)", "gyro-camera synchronization (V0.7)")
+                    .filterNot { it in measuredParts }
+                val verb = if (measuredParts.size > 1) "have" else "has"
+                "NOTE: ${measuredParts.joinToString(" and ")} $verb now been MEASURED, but " +
+                    "${missing.joinToString(" and ")} still ${if (missing.size > 1) "haven't" else "hasn't"}. " +
+                    "Confirmed classification — and any level above Basic — still requires all three."
+            }
+            eligibility.eligible ->
+                "CONCLUSION: All three measurements (V0.3, V0.4, V0.7) are present and every threshold " +
+                    "checked above was met. Classified as ADVANCED with full evidence."
+            else ->
+                "CONCLUSION: All three measurements (V0.3, V0.4, V0.7) are present, but " +
+                    "${eligibility.failureReasons.joinToString("; ")}. Remaining at BASIC — see the " +
+                    "MEASURED/WARNING lines above for the specific numbers."
         }
 
-        return CapabilityResult(CapabilityLevel.LEVEL_1_BASIC, reasons, fullyEvidenced = false)
+        val level = if (eligibility.eligible) CapabilityLevel.LEVEL_2_ADVANCED else CapabilityLevel.LEVEL_1_BASIC
+        return CapabilityResult(level, reasons, fullyEvidenced = eligibility.eligible)
+    }
+
+    /**
+     * Turns a V0.8 OrientationDriftSnapshot into a documented reasoning
+     * line. This is INFORMATIONAL ONLY — deliberately not part of
+     * [advancedEligibility]. That gate was scoped around the three
+     * measurements (V0.3/V0.4/V0.7) that together answer "can this device
+     * do gyro-based EIS at all"; orientation drift is a property of the
+     * INTEGRATION pipeline built on top of that answer, not a new input to
+     * it. Surfacing it here still matters for transparency (spec section
+     * 45: "it must expose limitations"), it just doesn't move the level.
+     */
+    private fun measuredOrientationDriftReasoning(d: OrientationDriftSnapshot): List<String> {
+        val correctedPart = d.driftCorrectedDegrees?.let { ", bias-corrected=%.2f°".format(it) } ?: ""
+        val line = "MEASURED: Gyro-integrated orientation drifted %.2f° from the rotation-vector " +
+            "reference over a %.1fs test window (uncorrected%s)."
+        return listOf(line.format(d.driftUncorrectedDegrees, d.durationS, correctedPart))
+    }
+
+    private data class AdvancedEligibility(val eligible: Boolean, val failureReasons: List<String>)
+
+    /**
+     * The ONLY place LEVEL_2_ADVANCED can be produced. Requires all three
+     * optional measurements to be present AND every one of the following
+     * to independently pass its documented threshold (spec section 9:
+     * "do NOT use arbitrary scoring... every classification must have
+     * documented engineering reasoning"):
+     *
+     *   - sensor quality (V0.3): jitter and stationary noise both within
+     *     their MAX_* thresholds
+     *   - camera-stream quality (V0.4): at least one tested camera meets
+     *     the FPS floor AND stays within the jitter ceiling
+     *   - synchronization (V0.7): the offset estimate is TRUSTED (its own
+     *     correlation clears MIN_SYNC_CORRELATION_FOR_TRUSTED_OFFSET) and
+     *     the estimated offset itself is within MAX_SYNC_OFFSET_MS_FOR_ADVANCED
+     *
+     * No partial credit and no averaging across criteria — a single failed
+     * check keeps the device at Basic, with the specific reason recorded.
+     */
+    private fun advancedEligibility(
+        sensorQuality: SensorQualitySnapshot?,
+        cameraQuality: List<CameraStreamQualitySnapshot>,
+        syncResult: SyncResultSnapshot?,
+    ): AdvancedEligibility {
+        if (sensorQuality == null || cameraQuality.isEmpty() || syncResult == null) {
+            return AdvancedEligibility(false, listOf("not all three measurements have been run yet"))
+        }
+
+        val failures = mutableListOf<String>()
+
+        val jitterOk = sensorQuality.timestampJitterMs?.let {
+            it <= CapabilityThresholds.MAX_GYRO_TIMESTAMP_JITTER_MS_FOR_ADVANCED
+        } ?: false
+        if (!jitterOk) failures += "gyro timestamp jitter did not meet the Advanced threshold"
+
+        val noiseOk = sensorQuality.stationaryNoiseStdDevRadS <= CapabilityThresholds.MAX_GYRO_STATIONARY_STD_DEV_RAD_S
+        if (!noiseOk) failures += "gyro stationary noise did not meet the Advanced threshold"
+
+        val cameraOk = cameraQuality.any { cq ->
+            val fpsOk = (cq.measuredFps ?: 0.0) >= CapabilityThresholds.MIN_MEASURED_CAMERA_FPS_FOR_BASIC
+            val jOk = cq.frameIntervalJitterMs?.let { it <= CapabilityThresholds.MAX_CAMERA_FRAME_JITTER_MS_FOR_ADVANCED } ?: false
+            fpsOk && jOk
+        }
+        if (!cameraOk) failures += "no tested camera met both the FPS floor and jitter ceiling"
+
+        val syncCorrelationOk = (syncResult.correlation ?: 0.0) >= CapabilityThresholds.MIN_SYNC_CORRELATION_FOR_TRUSTED_OFFSET
+        val syncOffsetOk = syncResult.estimatedOffsetMs?.let {
+            kotlin.math.abs(it) <= CapabilityThresholds.MAX_SYNC_OFFSET_MS_FOR_ADVANCED
+        } ?: false
+        if (!syncCorrelationOk) failures += "the sync offset estimate's own correlation was too low to trust"
+        if (syncCorrelationOk && !syncOffsetOk) failures += "the estimated gyro-camera offset exceeded the Advanced threshold"
+
+        return AdvancedEligibility(failures.isEmpty(), failures)
+    }
+
+    /**
+     * Turns a V0.7 SyncResultSnapshot into documented reasoning lines.
+     */
+    private fun measuredSyncReasoning(s: SyncResultSnapshot): List<String> {
+        val lines = mutableListOf<String>()
+        lines += "AVAILABLE (camera ${s.cameraId}): declared timestamp source = " +
+            "${s.cameraTimestampSource}" +
+            if (s.cameraTimestampSource == "REALTIME") {
+                " (platform-guaranteed same clock domain as the gyroscope)."
+            } else {
+                " (NO platform guarantee — the offset below is a best-effort empirical estimate)."
+            }
+
+        if (s.estimatedOffsetMs != null && s.correlation != null) {
+            lines += "MEASURED (camera ${s.cameraId}): estimated gyro<->camera offset = " +
+                "${"%.1f".format(s.estimatedOffsetMs)} ms, at correlation r=" +
+                "${"%.3f".format(s.correlation)} (from ${s.gyroSampleCount} gyro samples, " +
+                "${s.cameraFrameCount} camera frames)."
+
+            if (s.correlation < CapabilityThresholds.MIN_SYNC_CORRELATION_FOR_TRUSTED_OFFSET) {
+                lines += "WARNING (camera ${s.cameraId}): correlation is below " +
+                    "MIN_SYNC_CORRELATION_FOR_TRUSTED_OFFSET " +
+                    "(${CapabilityThresholds.MIN_SYNC_CORRELATION_FOR_TRUSTED_OFFSET}) — this offset " +
+                    "estimate is not trusted."
+            } else if (kotlin.math.abs(s.estimatedOffsetMs) > CapabilityThresholds.MAX_SYNC_OFFSET_MS_FOR_ADVANCED) {
+                lines += "WARNING (camera ${s.cameraId}): estimated offset exceeds " +
+                    "MAX_SYNC_OFFSET_MS_FOR_ADVANCED (${CapabilityThresholds.MAX_SYNC_OFFSET_MS_FOR_ADVANCED} ms)."
+            }
+        } else {
+            lines += "ESTIMATED (camera ${s.cameraId}): offset estimate did not produce a usable result " +
+                "(insufficient overlapping samples between gyroscope and camera motion)."
+        }
+        return lines
     }
 
     /**
      * Turns a V0.4 CameraStreamQualitySnapshot list into documented
      * reasoning lines, one camera at a time (spec section 6: evaluate
-     * cameras independently). Does NOT change the returned CapabilityLevel
-     * — see classify() kdoc for why Advanced+ still requires V0.7 too.
+     * cameras independently). Does not decide the CapabilityLevel itself
+     * — see [advancedEligibility] for the actual gate.
      */
     private fun measuredCameraQualityReasoning(snapshots: List<CameraStreamQualitySnapshot>): List<String> {
         val lines = mutableListOf<String>()
@@ -183,10 +311,8 @@ class CapabilityEngine {
 
     /**
      * Turns a V0.3 SensorQualitySnapshot into documented reasoning lines.
-     * Deliberately does NOT change the returned CapabilityLevel — Advanced+
-     * also requires V0.4 (camera quality) and V0.7 (synchronization), which
-     * don't exist yet (see docs/ROADMAP.md). This only makes the REASONING
-     * more evidence-based ahead of that.
+     * Does not decide the CapabilityLevel itself — see
+     * [advancedEligibility] for the actual gate.
      */
     private fun measuredSensorQualityReasoning(q: SensorQualitySnapshot): List<String> {
         val lines = mutableListOf<String>()

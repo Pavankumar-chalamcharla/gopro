@@ -42,6 +42,8 @@ fun DiagnosticScreen(
     viewModel: ScanViewModel,
     onRunSensorQualityTest: () -> Unit = {},
     onRunCameraQualityTest: () -> Unit = {},
+    onRunSyncTest: () -> Unit = {},
+    onRunOrientationDriftTest: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
 
@@ -61,7 +63,7 @@ fun DiagnosticScreen(
             when (val s = state) {
                 is ScanUiState.Idle, is ScanUiState.Scanning -> ScanningIndicator()
                 is ScanUiState.Failed -> ErrorView(s.message, onRetry = { viewModel.rescan() })
-                is ScanUiState.Done -> ProfileView(s.profile, s.fromCache, onRunSensorQualityTest, onRunCameraQualityTest)
+                is ScanUiState.Done -> ProfileView(s.profile, s.fromCache, onRunSensorQualityTest, onRunCameraQualityTest, onRunSyncTest, onRunOrientationDriftTest)
             }
         }
     }
@@ -101,6 +103,8 @@ private fun ProfileView(
     fromCache: Boolean,
     onRunSensorQualityTest: () -> Unit,
     onRunCameraQualityTest: () -> Unit,
+    onRunSyncTest: () -> Unit,
+    onRunOrientationDriftTest: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -148,6 +152,18 @@ private fun ProfileView(
             }
         }
 
+        item {
+            Button(onClick = onRunSyncTest, modifier = Modifier.fillMaxWidth()) {
+                Text("Run Sync Test (V0.7)")
+            }
+        }
+
+        item {
+            Button(onClick = onRunOrientationDriftTest, modifier = Modifier.fillMaxWidth()) {
+                Text("Run Orientation Drift Test (V0.8)")
+            }
+        }
+
         profile.sensorQuality?.let { q ->
             item {
                 SectionCard(title = "Last Sensor Quality Test") {
@@ -172,6 +188,29 @@ private fun ProfileView(
                         KeyValueRow("Jitter", cq.frameIntervalJitterMs?.let { "%.3f ms".format(it) } ?: "unknown")
                         KeyValueRow("Likely dropped frames", cq.likelyDroppedFrames.toString())
                         Spacer(Modifier.height(8.dp))
+                    }
+                }
+            }
+        }
+
+        profile.syncResult?.let { sr ->
+            item {
+                SectionCard(title = "Last Sync Test") {
+                    KeyValueRow("Camera", sr.cameraId)
+                    KeyValueRow("Timestamp source", sr.cameraTimestampSource)
+                    KeyValueRow("Estimated offset", sr.estimatedOffsetMs?.let { "%.1f ms".format(it) } ?: "unknown")
+                    KeyValueRow("Correlation", sr.correlation?.let { "%.3f".format(it) } ?: "unknown")
+                }
+            }
+        }
+
+        profile.orientationDrift?.let { od ->
+            item {
+                SectionCard(title = "Last Orientation Drift Test") {
+                    KeyValueRow("Duration", "%.1f s".format(od.durationS))
+                    KeyValueRow("Drift (uncorrected)", "%.2f°".format(od.driftUncorrectedDegrees))
+                    if (od.driftCorrectedDegrees != null) {
+                        KeyValueRow("Drift (bias-corrected)", "%.2f°".format(od.driftCorrectedDegrees))
                     }
                 }
             }

@@ -2,25 +2,27 @@ package com.eiscamera.deviceprofile
 
 import com.eiscamera.camera.CameraInfo
 import com.eiscamera.camera.CameraStreamQualitySnapshot
+import com.eiscamera.orientation.OrientationDriftSnapshot
 import com.eiscamera.processing.ProcessingInfo
 import com.eiscamera.sensors.SensorInfo
 import com.eiscamera.sensors.SensorQualitySnapshot
+import com.eiscamera.synchronization.SyncResultSnapshot
 import kotlinx.serialization.Serializable
 
 /**
  * Persistent, versioned snapshot of everything the Device Capability
  * Scanner discovered about this device (spec section 8).
  *
- * SCHEMA v2 (V0.3) added [sensorQuality]. SCHEMA v3 (V0.4) adds
- * [cameraQuality] — measured real frame rate, jitter, and a likely-dropped-
- * frame heuristic per camera id (see camera/CameraStreamQualityAnalyzer.kt).
- * It's a list, not a single value, because each camera on the device is
- * tested and reported independently (spec section 6).
- *
- * Still NOT included, intentionally:
- *   - gyro<->camera synchronization offset/drift -> needs V0.7
- * That will extend this schema further (bumping SCHEMA_VERSION again)
- * once implemented, rather than being faked here. See docs/ROADMAP.md.
+ * SCHEMA v2 (V0.3) added [sensorQuality]. SCHEMA v3 (V0.4) added
+ * [cameraQuality]. SCHEMA v4 (V0.7) added [syncResult]. SCHEMA v5 (V0.8)
+ * adds [orientationDrift] — an empirical measurement of how far a pure
+ * gyro-integrated orientation drifts from the phone's own fused reference
+ * over a real test window (see orientation/OrientationDriftAnalyzer.kt).
+ * Unlike sensorQuality/cameraQuality/syncResult, this does NOT feed
+ * CapabilityEngine's Advanced-level gate — it's informational evidence
+ * about the orientation-estimation pipeline itself, not one of the three
+ * measurements that gate was originally scoped around. See
+ * CapabilityEngine kdoc.
  */
 @Serializable
 data class DeviceProfile(
@@ -34,9 +36,11 @@ data class DeviceProfile(
     val capability: CapabilityResultSnapshot,
     val sensorQuality: SensorQualitySnapshot? = null,
     val cameraQuality: List<CameraStreamQualitySnapshot> = emptyList(),
+    val syncResult: SyncResultSnapshot? = null,
+    val orientationDrift: OrientationDriftSnapshot? = null,
 ) {
     companion object {
-        const val SCHEMA_VERSION = 3
+        const val SCHEMA_VERSION = 5
     }
 }
 
