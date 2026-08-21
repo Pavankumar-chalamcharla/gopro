@@ -26,7 +26,28 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        getByName("debug") {
+            // Fixed, repo-committed debug key so every build — whether from
+            // GitHub Actions (fresh VM every run) or a local machine — signs
+            // with the SAME key. Without this, AGP falls back to
+            // ~/.android/debug.keystore, which GitHub's ephemeral runners
+            // regenerate (with a brand-new random key) on every single run,
+            // making each new APK look like a "different app" to Android and
+            // forcing an uninstall before every update. This is a debug-only
+            // key with a widely-known, intentionally public password — never
+            // do this for a release signingConfig.
+            storeFile = file("../debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
         }
