@@ -189,6 +189,42 @@ object CapabilityThresholds {
     const val MAX_LIKELY_DROPPED_FRAME_RATIO: Double = 0.05
 
     // -----------------------------------------------------------------
+    // SYNCHRONIZATION (measured) — APPLIED as of V0.7.
+    // -----------------------------------------------------------------
+
+    /**
+     * MEANING: minimum cross-correlation between the gyro's angular
+     *   velocity and the camera's motion-energy signal, below which the
+     *   estimated clock offset (see SyncAnalyzer.estimateOffset) is not
+     *   trusted — a weak correlation means the two signals may not have
+     *   been describing the same motion clearly enough (e.g. too little
+     *   real motion during the test, or a genuine mismatch) for the
+     *   estimate to mean much.
+     * UNITS: dimensionless, range [-1, 1] (Pearson correlation).
+     * ORIGIN: Provisional; same "clearly related signals" rule of thumb
+     *   used for V0.3's MIN_DYNAMIC_CORRELATION_FOR_CONSISTENT_SIGNAL.
+     * STATUS: APPLIED (V0.7) — gates whether the sync estimate counts as
+     *   trustworthy evidence at all in CapabilityEngine's Advanced-level
+     *   gate.
+     */
+    const val MIN_SYNC_CORRELATION_FOR_TRUSTED_OFFSET: Double = 0.5
+
+    /**
+     * MEANING: maximum ABSOLUTE estimated clock offset between the gyro
+     *   and camera domains considered acceptable for Advanced EIS — a
+     *   larger offset means the interpolation mechanism (SyncAnalyzer.
+     *   estimateOrientationAt) would be asked to reach further outside
+     *   its two bracketing samples than is reasonable to trust, or
+     *   signals a real synchronization problem worth investigating rather
+     *   than silently correcting for.
+     * UNITS: milliseconds.
+     * ORIGIN: Provisional; a few gyro sample periods' worth of slack at
+     *   typical (~100-400Hz) gyro rates.
+     * STATUS: APPLIED (V0.7).
+     */
+    const val MAX_SYNC_OFFSET_MS_FOR_ADVANCED: Double = 50.0
+
+    // -----------------------------------------------------------------
     // SYNCHRONIZATION (measured) — NOT YET APPLIED. Defined for V0.7.
     // -----------------------------------------------------------------
 

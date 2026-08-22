@@ -111,6 +111,12 @@ class CameraInventory(context: Context) {
             emptyList()
         }
 
+        val timestampSource = when (c.get(CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE)) {
+            CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_REALTIME -> "REALTIME"
+            CameraCharacteristics.SENSOR_INFO_TIMESTAMP_SOURCE_UNKNOWN -> "UNKNOWN"
+            else -> "UNKNOWN"
+        }
+
         return CameraInfo(
             cameraId = id,
             lensFacing = facing,
@@ -133,6 +139,7 @@ class CameraInventory(context: Context) {
             isLogicalMultiCamera = isLogical,
             physicalCameraIds = physicalIds,
             capabilities = capabilityNames,
+            timestampSource = timestampSource,
         )
     }
 
@@ -142,7 +149,7 @@ class CameraInventory(context: Context) {
         CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_POST_PROCESSING -> "MANUAL_POST_PROCESSING"
         CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW -> "RAW"
         CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA -> "LOGICAL_MULTI_CAMERA"
-        CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO -> "HIGH_SPEED_VIDEO"
+        CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO -> "CONSTRAINED_HIGH_SPEED_VIDEO"
         else -> "CAP_$v"
     }
 }

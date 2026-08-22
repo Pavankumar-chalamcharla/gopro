@@ -61,4 +61,14 @@ data class CameraInfo(
     val isLogicalMultiCamera: Boolean,
     val physicalCameraIds: List<String>,
     val capabilities: List<String>,
+    /**
+     * "REALTIME" means this camera's CaptureResult.SENSOR_TIMESTAMP is
+     * guaranteed by the platform to be in the SAME clock domain as
+     * android.os.SystemClock.elapsedRealtimeNanos() — i.e. directly
+     * comparable to gyroscope SensorEvent timestamps with NO offset
+     * needed. "UNKNOWN" means no such guarantee exists; an empirical
+     * offset must be estimated (spec section 7, roadmap V0.7 — see
+     * synchronization/SyncAnalyzer.kt).
+     */
+    val timestampSource: String,
 )

@@ -89,6 +89,7 @@ class DeviceProfileSerializationTest {
                 isLogicalMultiCamera = false,
                 physicalCameraIds = emptyList(),
                 capabilities = listOf("BACKWARD_COMPATIBLE"),
+                timestampSource = "REALTIME",
             )
         ),
         processing = ProcessingInfo(
