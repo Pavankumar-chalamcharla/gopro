@@ -14,7 +14,7 @@ before the next one starts).
 | V0.6 | Camera recorder | Superseded by V0.4's real capture session + V0.7's concurrent collector — no separate stage needed |
 | V0.7 | Camera/gyro synchronization | **Done** — empirical clock-offset estimation (gyro angular velocity vs. camera motion-energy cross-correlation, robust to unrelated clock epochs) and SLERP-based orientation interpolation at arbitrary camera timestamps |
 | V0.8 | Orientation estimation | **Done** — quaternion exponential-map integration of raw angular velocity, plus an empirical on-device drift measurement against the rotation-vector reference (with automatic bias correction from V0.3 when available) |
-| V0.9 | Motion filtering | Not started — high-frequency vs. low-frequency motion separation |
+| V0.9 | Motion filtering | **Done** — SLERP-based single-pole low-pass filter on the orientation stream, separating intentional motion (preserved) from hand-shake (flagged as compensation to cancel later); frequency response verified numerically against the theoretical single-pole formula before implementation |
 | V1.0 | Basic real-time EIS | Not started — first end-to-end stabilized preview |
 | V1.1 | GPU EIS | Not started — OpenGL ES/EGL shader-based warp, replacing any CPU path |
 | V1.2 | Adaptive crop | Not started |
@@ -190,14 +190,44 @@ its own. Real sensor data did.
   a property of the integration pipeline built on top of that answer, not
   a new input to it. See CapabilityEngine kdoc.
 
-## What's next (V0.9 / V1.0)
+## What V0.9 added
 
-With V0.2 through V0.8 built, every purely-measurement stage in the
-original roadmap is done: capability scanning, sensor quality, camera
-quality, synchronization, and orientation estimation. The next milestone
-is the first one that isn't primarily about measurement —
-**V0.9: Motion filtering** — separating high-frequency unwanted movement
-(hand shake, vibration) from low-frequency intentional movement (panning,
-following a subject) in the integrated orientation stream (spec section
-12). That's the last building block before **V1.0: Basic real-time EIS**,
-the project's first actual stabilized preview.
+- `orientation/QuaternionMath.kt` — Hamilton product, normalize, angle-
+  between, and SLERP consolidated into one shared module. These existed
+  as separate copies in `GyroIntegrator` and `SyncAnalyzer`; both were
+  refactored to delegate here (public APIs and behavior unchanged — their
+  existing tests continue to cover this code, just through a different
+  entry point) rather than adding a third copy for this filter to use.
+- `motion/OrientationSmoothingFilter.kt` — the actual V0.9 deliverable: a
+  SLERP-based single-pole low-pass filter, with a documented, verified
+  α↔cutoff-frequency relationship (`alphaForCutoff` / `cutoffForAlpha`),
+  a single-step function, and a `filterStream` convenience that also
+  reports the per-sample "compensation angle" — the gap between raw and
+  smoothed orientation, i.e. what a future stabilization stage would need
+  to cancel.
+- Deliberately the simplest correct option (a single-pole low-pass), not
+  a One Euro Filter or other adaptive scheme — spec section 12 warns
+  against reaching for sophistication without evidence it's needed.
+- No on-device UI this time, on purpose: unlike V0.3/V0.4/V0.7/V0.8, this
+  isn't a one-shot diagnostic test — it's a continuous filter meant to be
+  wired into the live pipeline at V1.0. Its correctness was established
+  entirely through frequency-response testing against synthetic data
+  (verified in Python first, then reproduced as permanent Kotlin
+  regression tests), matching spec section 29's explicit requirement for
+  filtering components ("known input signal -> expected frequency
+  response").
+
+## What's next (V1.0)
+
+Every building block V1.0 needs now exists: device capability scanning
+(V0.2), measured sensor/camera/sync quality (V0.3/V0.4/V0.7), continuous
+orientation integration (V0.8), and motion filtering (V0.9). **V1.0: Basic
+real-time EIS** is the first stage that wires these into an actual live
+pipeline — open the camera preview continuously (not just a timed test
+window), integrate gyro in real time, filter it, compute a per-frame
+compensation transform, and apply it to the preview via GPU (or a
+placeholder CPU path first, per spec section 17's "measure before
+assuming GPU is faster"). This is a meaningfully bigger jump than V0.2-V0.9
+— it's the first version with a continuously running pipeline instead of
+a bounded test window, which changes the threading and lifecycle
+questions substantially (spec section 28).

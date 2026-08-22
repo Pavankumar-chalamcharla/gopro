@@ -1,12 +1,10 @@
 package com.eiscamera.synchronization
 
 import com.eiscamera.motion.TimeSeriesCorrelation
+import com.eiscamera.orientation.QuaternionMath
 import com.eiscamera.sensors.SensorSample
-import kotlin.math.acos
-import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
@@ -154,40 +152,9 @@ object SyncAnalyzer {
      */
     fun slerp(q1: FloatArray, t1Ms: Double, q2: FloatArray, t2Ms: Double, queryTimeMs: Double): DoubleArray {
         val frac = if (t2Ms > t1Ms) ((queryTimeMs - t1Ms) / (t2Ms - t1Ms)).coerceIn(0.0, 1.0) else 0.0
-
-        val w1 = q1[0].toDouble(); val x1 = q1[1].toDouble(); val y1 = q1[2].toDouble(); val z1 = q1[3].toDouble()
-        var w2 = q2[0].toDouble(); var x2 = q2[1].toDouble(); var y2 = q2[2].toDouble(); var z2 = q2[3].toDouble()
-
-        var dot = w1 * w2 + x1 * x2 + y1 * y2 + z1 * z2
-        if (dot < 0.0) {
-            w2 = -w2; x2 = -x2; y2 = -y2; z2 = -z2
-            dot = -dot
-        }
-        dot = dot.coerceAtMost(1.0)
-
-        if (dot > 0.9995) {
-            // Nearly identical orientations: linear interpolation + re-normalize
-            // avoids numerical instability from dividing by sin(theta0) near 0.
-            val w = w1 + frac * (w2 - w1)
-            val x = x1 + frac * (x2 - x1)
-            val y = y1 + frac * (y2 - y1)
-            val z = z1 + frac * (z2 - z1)
-            val n = sqrt(w * w + x * x + y * y + z * z)
-            return if (n > 0) doubleArrayOf(w / n, x / n, y / n, z / n) else doubleArrayOf(1.0, 0.0, 0.0, 0.0)
-        }
-
-        val theta0 = acos(dot)
-        val sinTheta0 = sin(theta0)
-        val theta = theta0 * frac
-        val s0 = cos(theta) - dot * sin(theta) / sinTheta0
-        val s1 = sin(theta) / sinTheta0
-
-        return doubleArrayOf(
-            s0 * w1 + s1 * w2,
-            s0 * x1 + s1 * x2,
-            s0 * y1 + s1 * y2,
-            s0 * z1 + s1 * z2,
-        )
+        val q1d = doubleArrayOf(q1[0].toDouble(), q1[1].toDouble(), q1[2].toDouble(), q1[3].toDouble())
+        val q2d = doubleArrayOf(q2[0].toDouble(), q2[1].toDouble(), q2[2].toDouble(), q2[3].toDouble())
+        return QuaternionMath.slerp(q1d, q2d, frac)
     }
 
     /**
