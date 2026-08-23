@@ -15,7 +15,7 @@ before the next one starts).
 | V0.7 | Camera/gyro synchronization | **Done** — empirical clock-offset estimation (gyro angular velocity vs. camera motion-energy cross-correlation, robust to unrelated clock epochs) and SLERP-based orientation interpolation at arbitrary camera timestamps |
 | V0.8 | Orientation estimation | **Done** — quaternion exponential-map integration of raw angular velocity, plus an empirical on-device drift measurement against the rotation-vector reference (with automatic bias correction from V0.3 when available) |
 | V0.9 | Motion filtering | **Done** — SLERP-based single-pole low-pass filter on the orientation stream, separating intentional motion (preserved) from hand-shake (flagged as compensation to cancel later); frequency response verified numerically against the theoretical single-pole formula before implementation |
-| V1.0 | Basic real-time EIS | In progress — split into V1.0a/b/c/d sub-stages (see below); **V1.0a, V1.0b, and V1.0c-1 done** |
+| V1.0 | Basic real-time EIS | In progress — split into V1.0a/b/c/d sub-stages (see below); **V1.0a, V1.0b, V1.0c-1, and V1.0c-2 done** |
 | V1.1 | GPU EIS | Not started — OpenGL ES/EGL shader-based warp, replacing any CPU path |
 | V1.2 | Adaptive crop | Not started |
 | V1.3 | Lens profiles | Not started |
@@ -283,22 +283,41 @@ change, it's split into four small, independently-testable sub-stages:
     picked from the sizes Camera2 actually reports as valid for
     SurfaceTexture output) now sets the buffer size explicitly before
     the capture session is configured.
-  - **V1.0c-2 — the actual transform (not yet started).** Feed
-    `setCompensationMatrix` a real per-frame rotation + translation
-    derived from V1.0b's live orientation compensation, plus a matching
-    crop so the shifted content doesn't reveal empty edges. This is the
-    step where the picture will actually visibly change.
+  - **V1.0c-2 — the actual transform (DONE).** The first change in this
+    project that actually alters the image. `stabilization/
+    CompensationTransform.kt` converts the rotation gap between
+    V1.0b's raw and smoothed orientation into a 2D texture-coordinate
+    transform: roll maps directly to image rotation; pitch/yaw map to
+    translation via the standard small-angle pinhole approximation
+    (using this camera's actual V0.2-measured focal length and sensor
+    size — no invented calibration). A fixed 10% crop keeps typical
+    shifts safely inside the source texture instead of visibly
+    smearing the clamped edge. Every piece of this — the correction
+    quaternion's direction, the small-angle extraction error (~0.0001°
+    at 2°), the composed matrix's behavior in isolation (identity case,
+    crop-only, rotation-about-center) — was verified numerically in
+    Python before any Kotlin was written, then reproduced as permanent
+    unit tests in `CompensationTransformTest.kt`.
+    `LiveOrientationPipeline` gained `currentCorrectionQuaternion()`,
+    safe to call from the GL thread even though the pipeline updates
+    from its own separate sensor thread — both quaternions now publish
+    together as one immutable snapshot via `AtomicReference` so a
+    reader never sees a raw/smooth pair from two different instants.
+    **Known, expected uncertainty stated plainly rather than hidden:**
+    the correction *magnitude* is verified math; which screen direction
+    it visually corresponds to on this specific device can only be
+    confirmed by watching it run. If it looks backwards on-device,
+    that's a one-line sign flip in `CompensationTransform.compose`, not
+    a deeper problem — a normal first-pass step for this class of
+    feature, not evidence something was done wrong.
 - **V1.0d — measure it while it runs.** The spec section 19 debug
   overlay (FPS, gyro rate, EIS latency, crop %) so the numbers, not just
   the look, confirm it's working in real time.
 
-## What's next (V1.0c-2)
+## What's next (V1.0d)
 
-With the GL plumbing proven in V1.0c-1, V1.0c-2 is the step where the
-picture actually starts moving: derive a 2D rotation+translation from the
-gap between V1.0b's raw and smoothed orientation (roll maps directly to
-image rotation; pitch/yaw map to translation via the standard small-angle
-pinhole approximation, using this camera's measured focal length and
-sensor size from V0.2), verify that projection math numerically before
-touching Kotlin, then feed it into `CameraGlRenderer.setCompensationMatrix`
-each frame alongside a matching crop.
+With V1.0c-2 producing an actual live transform, V1.0d adds the spec
+section 19 debug overlay (FPS, GPU time, EIS latency, actual crop %) so
+the numbers — not just how it looks — confirm this is running in real
+time on real hardware, and give something concrete to check once the
+sign convention noted above is confirmed correct on-device.

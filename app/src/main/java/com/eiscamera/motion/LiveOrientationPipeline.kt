@@ -13,6 +13,7 @@ import com.eiscamera.orientation.QuaternionMath
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Live-updating orientation state for display. Quaternions are internal
@@ -57,6 +58,15 @@ data class LiveOrientationState(
  * than silently assuming zero bias is meaningful — [LiveOrientationState
  * .biasCorrectionApplied] reports which case is active so the UI can say
  * so honestly.
+ *
+ * CROSS-THREAD READS (added V1.0c-2): [currentCorrectionQuaternion] is
+ * read from the GL thread every rendered frame, a completely different
+ * thread from the one updating qRaw/qSmooth here. Both are published
+ * together as one immutable [OrientationSnapshot] via an AtomicReference
+ * so a reader always sees a matched raw/smooth pair from the same
+ * instant — never raw from one sample paired with smooth from a
+ * different one, which a pair of plain fields read across threads
+ * without synchronization could not guarantee.
  */
 class LiveOrientationPipeline(
     context: Context,
@@ -69,8 +79,9 @@ class LiveOrientationPipeline(
 
     private var thread: HandlerThread? = null
 
-    private var qRaw = IDENTITY.copyOf()
-    private var qSmooth = IDENTITY.copyOf()
+    private data class OrientationSnapshot(val qRaw: DoubleArray, val qSmooth: DoubleArray)
+    private val snapshotRef = AtomicReference(OrientationSnapshot(IDENTITY.copyOf(), IDENTITY.copyOf()))
+
     private var lastTimestampNs: Long? = null
     private var sampleCount = 0L
     private var rateEstimateHz: Double? = null
@@ -78,12 +89,31 @@ class LiveOrientationPipeline(
     private val _state = MutableStateFlow(LiveOrientationState())
     val state: StateFlow<LiveOrientationState> = _state.asStateFlow()
 
+    /**
+     * The rotation to apply to cancel the current shake: "how to get from
+     * the actual (raw) orientation to the desired (smoothed) one." Safe to
+     * call from any thread — this is the GL thread's read path, added for
+     * V1.0c-2. Returns identity (no correction) before the first two gyro
+     * samples have arrived, matching [LiveOrientationState]'s own
+     * before-running default.
+     *
+     * DIRECTION: verified numerically before this was written — for a
+     * camera that yawed +3deg off the smoothed reference, this returns
+     * a ~-3deg correction, i.e. the rotation that undoes the shake.
+     * conjugate(qRaw) is q_raw's inverse; composing with qSmooth on the
+     * right expresses "first undo raw, then apply smooth," matching the
+     * `new = old (x) delta` convention GyroIntegrator itself already uses.
+     */
+    fun currentCorrectionQuaternion(): DoubleArray {
+        val snap = snapshotRef.get()
+        return QuaternionMath.hamiltonProduct(QuaternionMath.conjugate(snap.qRaw), snap.qSmooth)
+    }
+
     /** Starts continuous integration. No-op if already running. */
     fun start() {
         if (thread != null) return
 
-        qRaw = IDENTITY.copyOf()
-        qSmooth = IDENTITY.copyOf()
+        snapshotRef.set(OrientationSnapshot(IDENTITY.copyOf(), IDENTITY.copyOf()))
         lastTimestampNs = null
         sampleCount = 0L
         rateEstimateHz = null
@@ -125,10 +155,12 @@ class LiveOrientationPipeline(
             wx -= bias[0]; wy -= bias[1]; wz -= bias[2]
         }
 
-        qRaw = GyroIntegrator.integrateStep(qRaw, doubleArrayOf(wx, wy, wz), dtS)
+        val snap = snapshotRef.get()
+        val newQRaw = GyroIntegrator.integrateStep(snap.qRaw, doubleArrayOf(wx, wy, wz), dtS)
         val alpha = OrientationSmoothingFilter.alphaForCutoff(cutoffHz, dtS)
-        qSmooth = OrientationSmoothingFilter.step(qSmooth, qRaw, alpha)
-        val compensationRad = QuaternionMath.angleBetween(qSmooth, qRaw)
+        val newQSmooth = OrientationSmoothingFilter.step(snap.qSmooth, newQRaw, alpha)
+        snapshotRef.set(OrientationSnapshot(newQRaw, newQSmooth))
+        val compensationRad = QuaternionMath.angleBetween(newQSmooth, newQRaw)
 
         sampleCount++
         // Exponential smoothing on the rate estimate itself (alpha=0.1) purely so

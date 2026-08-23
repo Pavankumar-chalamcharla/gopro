@@ -35,6 +35,9 @@ object QuaternionMath {
         return if (n > 0) doubleArrayOf(q[0] / n, q[1] / n, q[2] / n, q[3] / n) else doubleArrayOf(1.0, 0.0, 0.0, 0.0)
     }
 
+    /** Conjugate of a unit quaternion == its inverse (the rotation that undoes it). */
+    fun conjugate(q: DoubleArray): DoubleArray = doubleArrayOf(q[0], -q[1], -q[2], -q[3])
+
     /** Angle (radians, [0, π]) between two orientation quaternions, robust to
      *  the double-cover sign ambiguity (q and -q are the identical orientation). */
     fun angleBetween(q1: DoubleArray, q2: DoubleArray): Double {

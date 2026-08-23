@@ -142,7 +142,7 @@ private fun PreviewCameraPickerCard(cameras: List<CameraInfo>, onSelect: (String
         Spacer(Modifier.height(8.dp))
         Text(
             "Unlike the earlier tests, this preview keeps running continuously until you leave " +
-                "this screen — no stabilization applied yet, this is just the raw live feed.",
+                "this screen — gyro-based stabilization (V1.0c-2) is now live: watch for reduced shake, especially on quick hand movements.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Spacer(Modifier.height(16.dp))
@@ -179,6 +179,7 @@ private fun LivePreviewContent(
     onSwitchCamera: () -> Unit,
 ) {
     val orientationState by viewModel.orientationState.collectAsState()
+    val cameraInfo = remember(cameraId) { viewModel.availableCameras.find { it.cameraId == cameraId } }
 
     Column(modifier = Modifier.fillMaxSize()) {
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -195,6 +196,10 @@ private fun LivePreviewContent(
                                 surfaceTexture.setDefaultBufferSize(size.width, size.height)
                                 viewModel.start(cameraId, Surface(surfaceTexture))
                             },
+                            correctionQuaternionProvider = { viewModel.currentCorrectionQuaternion() },
+                            focalLengthMm = cameraInfo?.focalLengthsMm?.firstOrNull()?.toDouble(),
+                            sensorWidthMm = cameraInfo?.physicalSensorSizeMm?.widthMm?.toDouble(),
+                            sensorHeightMm = cameraInfo?.physicalSensorSizeMm?.heightMm?.toDouble(),
                         )
                         renderer.attachTo(this)
                         setRenderer(renderer)
@@ -232,7 +237,7 @@ private fun LivePreviewContent(
         ) {
             Text(
                 when (state) {
-                    is CameraPreviewUiState.Running -> "Live - camera $cameraId - no stabilization yet"
+                    is CameraPreviewUiState.Running -> "Live - camera $cameraId - stabilization active (V1.0c-2)"
                     is CameraPreviewUiState.Starting -> "Starting..."
                     is CameraPreviewUiState.Failed -> "Failed"
                     is CameraPreviewUiState.Idle -> "Idle"
@@ -256,7 +261,7 @@ private fun OrientationDebugOverlay(orientationState: LiveOrientationState, modi
     Card(modifier = modifier) {
         Column(modifier = Modifier.padding(10.dp)) {
             Text(
-                "V1.0b orientation pipeline",
+                "Orientation pipeline (driving stabilization)",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.Bold,
             )

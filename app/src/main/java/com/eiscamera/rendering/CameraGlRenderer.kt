@@ -4,6 +4,7 @@ import android.graphics.SurfaceTexture
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
+import com.eiscamera.stabilization.CompensationTransform
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -11,29 +12,31 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /**
- * V1.0c-1: replaces V1.0a/b's TextureView-based passthrough with a real
- * GPU render path — the camera feed drawn to the screen as an external
+ * V1.0c-1 built the GPU render path: the camera feed drawn as an external
  * OES texture through our own shader, via GLSurfaceView (which owns EGL
  * context/thread setup for us; hand-rolling raw EGL was considered and
- * is unnecessary complexity for what's needed here — spec section 12's
- * "don't add sophistication without evidence" applies to architecture
- * choices, not just algorithms).
+ * rejected as unnecessary complexity for what's needed here — spec
+ * section 12's "don't add sophistication without evidence" applies to
+ * architecture choices, not just algorithms).
  *
- * DELIBERATELY split from the actual stabilization math: [compensationMatrix]
- * defaults to, and stays at, the IDENTITY matrix in this step. The picture
- * should look and behave EXACTLY like V1.0a/b's TextureView passthrough,
- * pixel for pixel — proving this GL plumbing is correct on its own,
- * before V1.0c-2 starts feeding it a real per-frame transform. That keeps
- * "is the GL pipeline right" and "is the compensation math/sign
- * convention right" as two separate, independently-debuggable questions.
+ * V1.0c-2 (this version) is the first change that actually alters the
+ * image: each frame, [correctionQuaternionProvider] is asked for the
+ * current shake-cancelling rotation (from V1.0b's LiveOrientationPipeline),
+ * converted to a 2D texture transform by
+ * stabilization.CompensationTransform (verified numerically before this
+ * was written), and applied live. [focalLengthMm]/[sensorWidthMm]/
+ * [sensorHeightMm] are this camera's already-measured V0.2 values, used
+ * for the pitch/yaw-to-shift approximation — pass null for any that
+ * aren't available rather than guessing (spec section 16).
  *
  * THREADING: every method here runs on GLSurfaceView's own dedicated GL
  * thread, with the EGL context already current — this class must never
  * be called from any other thread, and never touches GL state outside
- * these callbacks. [setCompensationMatrix] is the one exception (called
- * from whichever thread computes the compensation, V1.0c-2's job), so it
- * publishes through a @Volatile field rather than assuming same-thread
- * access.
+ * these callbacks. [correctionQuaternionProvider] is the one exception:
+ * it's invoked from this GL thread but reads state that
+ * LiveOrientationPipeline updates from its OWN separate sensor thread —
+ * that cross-thread read is LiveOrientationPipeline's responsibility to
+ * make safe (see its AtomicReference-based snapshot), not this class's.
  *
  * FRAME LIFECYCLE / BACKPRESSURE: Camera2 (on its own camera thread, see
  * CameraPreviewViewModel) writes completed frames into this class's
@@ -45,15 +48,20 @@ import javax.microedition.khronos.opengles.GL10
  * [SurfaceTexture.updateTexImage] to latch the newest frame before
  * drawing it.
  *
- * MATRIX CONVENTION: [compensationMatrix] is a 3x3 matrix in OpenGL's
- * standard COLUMN-MAJOR layout (the format glUniformMatrix3fv expects
- * with transpose=false) — worth stating explicitly now, before V1.0c-2
- * starts constructing real rotation/translation matrices, since a
- * row/column mix-up there would silently produce a transposed (wrong)
- * transform rather than a compile error.
+ * SIGN CONVENTION CAVEAT (also stated in CompensationTransform's kdoc,
+ * worth repeating at the integration point): if the stabilization looks
+ * like it's moving the wrong way on-device, that's a one-line sign flip
+ * in CompensationTransform.compose, not a problem with this class or a
+ * sign something is fundamentally wrong — a normal, expected first-pass
+ * step for this class of feature.
  */
 class CameraGlRenderer(
     private val onSurfaceTextureReady: (SurfaceTexture) -> Unit,
+    private val correctionQuaternionProvider: () -> DoubleArray,
+    private val focalLengthMm: Double?,
+    private val sensorWidthMm: Double?,
+    private val sensorHeightMm: Double?,
+    private val cropMargin: Double = CompensationTransform.DEFAULT_CROP_MARGIN,
 ) : GLSurfaceView.Renderer {
 
     private var program = 0
@@ -68,9 +76,6 @@ class CameraGlRenderer(
     private var textureHandle = 0
 
     private val stMatrix = FloatArray(16)
-
-    @Volatile
-    private var compensationMatrix: FloatArray = IDENTITY_3X3.copyOf()
 
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
@@ -89,17 +94,6 @@ class CameraGlRenderer(
      *  can request redraws on the view that owns this renderer. */
     fun attachTo(view: GLSurfaceView) {
         glSurfaceView = view
-    }
-
-    /**
-     * Publishes a new 3x3 compensation matrix (column-major) to apply on
-     * the next drawn frame. Safe to call from any thread. V1.0c-1 never
-     * calls this, leaving the identity default in place; V1.0c-2 is what
-     * actually uses it.
-     */
-    fun setCompensationMatrix(matrix: FloatArray) {
-        require(matrix.size == 9) { "expected a 3x3 matrix (9 floats), got ${matrix.size}" }
-        compensationMatrix = matrix
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -132,6 +126,14 @@ class CameraGlRenderer(
         surfaceTexture.updateTexImage()
         surfaceTexture.getTransformMatrix(stMatrix)
 
+        val compensationMatrix = CompensationTransform.buildMatrix(
+            correctionQuaternion = correctionQuaternionProvider(),
+            focalLengthMm = focalLengthMm,
+            sensorWidthMm = sensorWidthMm,
+            sensorHeightMm = sensorHeightMm,
+            cropMargin = cropMargin,
+        )
+
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         GLES20.glUseProgram(program)
@@ -158,12 +160,6 @@ class CameraGlRenderer(
     }
 
     companion object {
-        val IDENTITY_3X3 = floatArrayOf(
-            1f, 0f, 0f,
-            0f, 1f, 0f,
-            0f, 0f, 1f,
-        )
-
         // uCompensationMatrix is applied AFTER uSTMatrix (i.e. in the camera's
         // already sensor-corrected, upright coordinate space) rather than
         // before it — so V1.0c-2's transform only ever has to reason about a

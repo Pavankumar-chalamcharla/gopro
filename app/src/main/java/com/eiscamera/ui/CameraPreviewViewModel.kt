@@ -49,6 +49,11 @@ class CameraPreviewViewModel(application: Application) : AndroidViewModel(applic
     )
     val orientationState: StateFlow<LiveOrientationState> = orientationPipeline.state
 
+    /** V1.0c-2: the GL renderer's per-frame read path into the orientation
+     *  pipeline — see LiveOrientationPipeline.currentCorrectionQuaternion
+     *  for the thread-safety and sign-convention notes. */
+    fun currentCorrectionQuaternion(): DoubleArray = orientationPipeline.currentCorrectionQuaternion()
+
     private var camera: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     private var thread: HandlerThread? = null
