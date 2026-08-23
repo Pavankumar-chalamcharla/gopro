@@ -3,6 +3,7 @@ package com.eiscamera.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.SurfaceTexture
+import android.hardware.camera2.CameraManager
 import android.opengl.GLSurfaceView
 import android.view.Surface
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -48,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.eiscamera.camera.CameraInfo
+import com.eiscamera.camera.CameraSessionUtils
 import com.eiscamera.motion.LiveOrientationState
 import com.eiscamera.rendering.CameraGlRenderer
 
@@ -187,6 +189,10 @@ private fun LivePreviewContent(
                         setEGLContextClientVersion(2)
                         val renderer = CameraGlRenderer(
                             onSurfaceTextureReady = { surfaceTexture ->
+                                val cameraManager = ctx.getSystemService(android.content.Context.CAMERA_SERVICE) as CameraManager
+                                val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+                                val size = CameraSessionUtils.choosePreviewSize(characteristics)
+                                surfaceTexture.setDefaultBufferSize(size.width, size.height)
                                 viewModel.start(cameraId, Surface(surfaceTexture))
                             },
                         )

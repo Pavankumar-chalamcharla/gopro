@@ -273,6 +273,16 @@ change, it's split into four small, independently-testable sub-stages:
     correct in isolation, so V1.0c-2's actual transform math is the only
     new variable when it's added, rather than debugging GL setup and
     stabilization math at the same time.
+    **Fixed after first on-device test:** a hand-created `SurfaceTexture`
+    defaults to a 1x1 pixel buffer until told otherwise, unlike
+    `TextureView` which sets this automatically to match its own
+    on-screen size — this had gone unset, so Camera2 fell back to a tiny
+    compatible resolution that then got stretched across the full
+    screen, a real and visible quality drop, not an inherent cost of
+    moving to GL. `CameraSessionUtils.choosePreviewSize` (~1280x720,
+    picked from the sizes Camera2 actually reports as valid for
+    SurfaceTexture output) now sets the buffer size explicitly before
+    the capture session is configured.
   - **V1.0c-2 — the actual transform (not yet started).** Feed
     `setCompensationMatrix` a real per-frame rotation + translation
     derived from V1.0b's live orientation compensation, plus a matching
