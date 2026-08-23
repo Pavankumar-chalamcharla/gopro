@@ -8,6 +8,7 @@ import android.opengl.GLSurfaceView
 import android.view.Surface
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -42,6 +43,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -52,6 +54,8 @@ import com.eiscamera.camera.CameraInfo
 import com.eiscamera.camera.CameraSessionUtils
 import com.eiscamera.motion.LiveOrientationState
 import com.eiscamera.rendering.CameraGlRenderer
+import com.eiscamera.rendering.RenderStats
+import com.eiscamera.stabilization.CompensationTransform
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -180,63 +184,73 @@ private fun LivePreviewContent(
 ) {
     val orientationState by viewModel.orientationState.collectAsState()
     val cameraInfo = remember(cameraId) { viewModel.availableCameras.find { it.cameraId == cameraId } }
+    var renderStats by remember(cameraId) { mutableStateOf(RenderStats()) }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { ctx ->
-                    GLSurfaceView(ctx).apply {
-                        layoutParams = android.view.ViewGroup.LayoutParams(
-                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                        )
-                        setEGLContextClientVersion(2)
-                        val renderer = CameraGlRenderer(
-                            onSurfaceTextureReady = { surfaceTexture ->
-                                val cameraManager = ctx.getSystemService(android.content.Context.CAMERA_SERVICE) as CameraManager
-                                val characteristics = cameraManager.getCameraCharacteristics(cameraId)
-                                val size = CameraSessionUtils.choosePreviewSize(characteristics)
-                                surfaceTexture.setDefaultBufferSize(size.width, size.height)
-                                viewModel.start(cameraId, Surface(surfaceTexture))
-                            },
-                            correctionQuaternionProvider = { viewModel.currentCorrectionQuaternion() },
-                            focalLengthMm = cameraInfo?.focalLengthsMm?.firstOrNull()?.toDouble(),
-                            sensorWidthMm = cameraInfo?.physicalSensorSizeMm?.widthMm?.toDouble(),
-                            sensorHeightMm = cameraInfo?.physicalSensorSizeMm?.heightMm?.toDouble(),
-                        )
-                        renderer.attachTo(this)
-                        setRenderer(renderer)
-                        renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
-                    }
-                },
-                onRelease = { viewModel.stop() },
-            )
-            when (state) {
-                is CameraPreviewUiState.Starting -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
-                is CameraPreviewUiState.Failed -> Box(
-                    modifier = Modifier.fillMaxSize().padding(24.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        "Preview failed: ${state.message}",
-                        color = MaterialTheme.colorScheme.error,
-                        textAlign = TextAlign.Center,
+    // Full-screen preview with controls OVERLAID on top, not sharing vertical
+    // space with it via a separate Column/weight(1f)/Row — that structure
+    // was found, on real-device testing, to leave a large unfilled gap below
+    // the video with the bottom row visibly squeezed into a sliver width.
+    // This is also just the standard pattern real camera apps use.
+    Box(modifier = Modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                GLSurfaceView(ctx).apply {
+                    layoutParams = android.view.ViewGroup.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                     )
+                    setEGLContextClientVersion(2)
+                    val renderer = CameraGlRenderer(
+                        onSurfaceTextureReady = { surfaceTexture ->
+                            val cameraManager = ctx.getSystemService(android.content.Context.CAMERA_SERVICE) as CameraManager
+                            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+                            val size = CameraSessionUtils.choosePreviewSize(characteristics)
+                            surfaceTexture.setDefaultBufferSize(size.width, size.height)
+                            viewModel.start(cameraId, Surface(surfaceTexture))
+                        },
+                        correctionQuaternionProvider = { viewModel.currentCorrectionQuaternion() },
+                        focalLengthMm = cameraInfo?.focalLengthsMm?.firstOrNull()?.toDouble(),
+                        sensorWidthMm = cameraInfo?.physicalSensorSizeMm?.widthMm?.toDouble(),
+                        sensorHeightMm = cameraInfo?.physicalSensorSizeMm?.heightMm?.toDouble(),
+                        onFrameRendered = { stats -> renderStats = stats },
+                    )
+                    renderer.attachTo(this)
+                    setRenderer(renderer)
+                    renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
                 }
-                else -> {}
+            },
+            onRelease = { viewModel.stop() },
+        )
+        when (state) {
+            is CameraPreviewUiState.Starting -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
             }
-            if (state is CameraPreviewUiState.Running) {
-                OrientationDebugOverlay(
-                    orientationState = orientationState,
-                    modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
+            is CameraPreviewUiState.Failed -> Box(
+                modifier = Modifier.fillMaxSize().padding(24.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Preview failed: ${state.message}",
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center,
                 )
             }
+            else -> {}
+        }
+        if (state is CameraPreviewUiState.Running) {
+            OrientationDebugOverlay(
+                orientationState = orientationState,
+                renderStats = renderStats,
+                modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
+            )
         }
         Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(Color.Black.copy(alpha = 0.55f))
+                .padding(16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
@@ -246,26 +260,32 @@ private fun LivePreviewContent(
                     is CameraPreviewUiState.Failed -> "Failed"
                     is CameraPreviewUiState.Idle -> "Idle"
                 },
+                color = Color.White,
                 style = MaterialTheme.typography.bodyMedium,
             )
-            TextButton(onClick = onSwitchCamera) { Text("Switch Camera") }
+            TextButton(onClick = onSwitchCamera) { Text("Switch Camera", color = Color.White) }
         }
     }
 }
 
 /**
- * V1.0b: shows the orientation pipeline running alongside the preview is
- * actually keeping up in real time — gyro rate should sit near the ~199Hz
- * V0.3 measured on this device, and sample count should climb steadily
- * with no long pauses. compensationAngle is what a future stabilization
- * transform would need to cancel; it does nothing to the image yet.
+ * V1.0b/d: shows the orientation pipeline AND the render pipeline are
+ * actually keeping up in real time — gyro rate should sit near what V0.3
+ * measured on this device, sample count should climb steadily with no
+ * long pauses, and FPS/render time (V1.0d, spec section 19: measured not
+ * assumed) confirm the GPU side is real too, not just the numbers above.
+ * compensationAngle is what the transform is cancelling right now.
  */
 @Composable
-private fun OrientationDebugOverlay(orientationState: LiveOrientationState, modifier: Modifier = Modifier) {
+private fun OrientationDebugOverlay(
+    orientationState: LiveOrientationState,
+    renderStats: RenderStats,
+    modifier: Modifier = Modifier,
+) {
     Card(modifier = modifier) {
         Column(modifier = Modifier.padding(10.dp)) {
             Text(
-                "Orientation pipeline (driving stabilization)",
+                "Orientation + render pipeline",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.Bold,
             )
@@ -283,6 +303,18 @@ private fun OrientationDebugOverlay(orientationState: LiveOrientationState, modi
             )
             Text(
                 if (orientationState.biasCorrectionApplied) "Bias-corrected (V0.3)" else "No bias correction (run V0.3 first)",
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Text(
+                "Render FPS: " + (renderStats.fps?.let { "%.1f".format(it) } ?: "..."),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Text(
+                "CPU draw time: " + (renderStats.renderTimeMs?.let { "%.1f ms".format(it) } ?: "..."),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Text(
+                "Crop: %.0f%%".format(CompensationTransform.DEFAULT_CROP_MARGIN * 100),
                 style = MaterialTheme.typography.labelSmall,
             )
         }

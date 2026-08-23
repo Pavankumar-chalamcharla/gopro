@@ -15,7 +15,7 @@ before the next one starts).
 | V0.7 | Camera/gyro synchronization | **Done** — empirical clock-offset estimation (gyro angular velocity vs. camera motion-energy cross-correlation, robust to unrelated clock epochs) and SLERP-based orientation interpolation at arbitrary camera timestamps |
 | V0.8 | Orientation estimation | **Done** — quaternion exponential-map integration of raw angular velocity, plus an empirical on-device drift measurement against the rotation-vector reference (with automatic bias correction from V0.3 when available) |
 | V0.9 | Motion filtering | **Done** — SLERP-based single-pole low-pass filter on the orientation stream, separating intentional motion (preserved) from hand-shake (flagged as compensation to cancel later); frequency response verified numerically against the theoretical single-pole formula before implementation |
-| V1.0 | Basic real-time EIS | In progress — split into V1.0a/b/c/d sub-stages (see below); **V1.0a, V1.0b, V1.0c-1, and V1.0c-2 done** |
+| V1.0 | Basic real-time EIS | **Done** — split into V1.0a/b/c/d sub-stages (see below), all complete: continuous GPU preview, live orientation pipeline, real-time gyro-based stabilization transform, and measured performance numbers |
 | V1.1 | GPU EIS | Not started — OpenGL ES/EGL shader-based warp, replacing any CPU path |
 | V1.2 | Adaptive crop | Not started |
 | V1.3 | Lens profiles | Not started |
@@ -350,14 +350,36 @@ change, it's split into four small, independently-testable sub-stages:
        layer rather than the normal View drawing path. Now given
        explicit `MATCH_PARENT` LayoutParams rather than relying on
        Compose's `AndroidView` default sizing inference.
-- **V1.0d — measure it while it runs.** The spec section 19 debug
-  overlay (FPS, gyro rate, EIS latency, crop %) so the numbers, not just
-  the look, confirm it's working in real time.
+- **V1.0d — measure it while it runs (DONE).** `CameraGlRenderer` now
+  tracks `RenderStats` — a rolling FPS estimate from actual
+  onDrawFrame-to-onDrawFrame wall-clock time, and per-frame CPU-side
+  draw time — stated explicitly as CPU submission time, not true GPU
+  execution time (which needs the EXT_disjoint_timer_query extension,
+  not assumed available and not used here — spec section 41's
+  MEASURED/ESTIMATED distinction). The debug overlay now shows this
+  alongside gyro rate, compensation angle, and the actual crop
+  percentage in effect, so the numbers — not just how it looks —
+  confirm this is running in real time. True GPU timing and camera FPS
+  (vs. render FPS, which can legitimately differ) remain open for a
+  more careful future pass.
+  **Also folded in during this same delivery, at the user's request
+  rather than as a separate round-trip:** the preview layout was
+  restructured from a `Column`/`weight(1f)`/`Row` split to a single
+  full-screen `Box` with controls overlaid directly on the video —
+  the `Row`-based approach was still leaving a large unfilled gap
+  below the video with the bottom controls squeezed into a sliver
+  width, even after the `GLSurfaceView` LayoutParams fix above. This
+  is also simply the standard pattern real camera apps use.
 
-## What's next (V1.0d)
+## What's next (V1.1+)
 
-With V1.0c-2 producing an actual live transform, V1.0d adds the spec
-section 19 debug overlay (FPS, GPU time, EIS latency, actual crop %) so
-the numbers — not just how it looks — confirm this is running in real
-time on real hardware, and give something concrete to check once the
-sign convention noted above is confirmed correct on-device.
+Every V1.0 sub-stage is done: continuous GPU preview (a), live
+orientation pipeline (b), the actual GPU stabilization transform (c),
+and measured real-time performance numbers (d). V1.0 as a whole —
+**Basic real-time EIS** — is complete: a continuously-running, gyro-
+stabilized live camera preview with the numbers to back up that it's
+real. Natural next directions per the original roadmap: V1.1 (moving
+this same transform onto MediaCodec for actual video recording, not
+just live preview) or revisiting the deadband/crop-margin/cutoff
+constants now that there's a real device to tune them against, rather
+than the reasoned-but-unvalidated starting values used so far.

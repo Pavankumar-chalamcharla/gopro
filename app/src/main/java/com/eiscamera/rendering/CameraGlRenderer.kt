@@ -12,6 +12,18 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /**
+ * V1.0d: per-frame performance numbers — measured, not assumed (spec
+ * section 19: "do not claim real-time without measurement"). [fps] is
+ * the rolling rate of actual onDrawFrame calls (i.e. rendered camera
+ * frames, not a fixed assumption). [renderTimeMs] is CPU-side wall-clock
+ * time for one draw call, stated explicitly as CPU-side rather than
+ * true GPU execution time, which needs GL timer-query extensions this
+ * class doesn't use yet — an honest simplification, not a claim of
+ * more precision than this actually measures.
+ */
+data class RenderStats(val fps: Double? = null, val renderTimeMs: Double? = null)
+
+/**
  * V1.0c-1 built the GPU render path: the camera feed drawn as an external
  * OES texture through our own shader, via GLSurfaceView (which owns EGL
  * context/thread setup for us; hand-rolling raw EGL was considered and
@@ -19,9 +31,9 @@ import javax.microedition.khronos.opengles.GL10
  * section 12's "don't add sophistication without evidence" applies to
  * architecture choices, not just algorithms).
  *
- * V1.0c-2 (this version) is the first change that actually alters the
- * image: each frame, [correctionQuaternionProvider] is asked for the
- * current shake-cancelling rotation (from V1.0b's LiveOrientationPipeline),
+ * V1.0c-2 is the first change that actually alters the image: each
+ * frame, [correctionQuaternionProvider] is asked for the current
+ * shake-cancelling rotation (from V1.0b's LiveOrientationPipeline),
  * converted to a 2D texture transform by
  * stabilization.CompensationTransform (verified numerically before this
  * was written), and applied live. [focalLengthMm]/[sensorWidthMm]/
@@ -37,6 +49,9 @@ import javax.microedition.khronos.opengles.GL10
  * LiveOrientationPipeline updates from its OWN separate sensor thread —
  * that cross-thread read is LiveOrientationPipeline's responsibility to
  * make safe (see its AtomicReference-based snapshot), not this class's.
+ * [onFrameRendered] is likewise invoked from this GL thread every frame;
+ * its receiver (V1.0d's debug overlay, via a StateFlow) is responsible
+ * for safely observing that from the main thread, not this class.
  *
  * FRAME LIFECYCLE / BACKPRESSURE: Camera2 (on its own camera thread, see
  * CameraPreviewViewModel) writes completed frames into this class's
@@ -54,6 +69,11 @@ import javax.microedition.khronos.opengles.GL10
  * in CompensationTransform.compose, not a problem with this class or a
  * sign something is fundamentally wrong — a normal, expected first-pass
  * step for this class of feature.
+ *
+ * V1.0d added [onFrameRendered]: fires once per drawn frame with a
+ * rolling FPS estimate and this frame's CPU-side render time, so the
+ * debug overlay can show measured real-time numbers rather than an
+ * assumption that GL rendering "must be" keeping up (spec section 19).
  */
 class CameraGlRenderer(
     private val onSurfaceTextureReady: (SurfaceTexture) -> Unit,
@@ -62,6 +82,7 @@ class CameraGlRenderer(
     private val sensorWidthMm: Double?,
     private val sensorHeightMm: Double?,
     private val cropMargin: Double = CompensationTransform.DEFAULT_CROP_MARGIN,
+    private val onFrameRendered: (RenderStats) -> Unit = {},
 ) : GLSurfaceView.Renderer {
 
     private var program = 0
@@ -76,6 +97,8 @@ class CameraGlRenderer(
     private var textureHandle = 0
 
     private val stMatrix = FloatArray(16)
+    private var lastFrameStartNs: Long? = null
+    private var fpsEstimate: Double? = null
 
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
@@ -123,6 +146,17 @@ class CameraGlRenderer(
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        val frameStartNs = System.nanoTime()
+        val prevFrameStartNs = lastFrameStartNs
+        lastFrameStartNs = frameStartNs
+        if (prevFrameStartNs != null) {
+            val intervalS = (frameStartNs - prevFrameStartNs) / 1_000_000_000.0
+            if (intervalS > 0) {
+                val instantaneousFps = 1.0 / intervalS
+                fpsEstimate = fpsEstimate?.let { it * 0.9 + instantaneousFps * 0.1 } ?: instantaneousFps
+            }
+        }
+
         surfaceTexture.updateTexImage()
         surfaceTexture.getTransformMatrix(stMatrix)
 
@@ -157,12 +191,15 @@ class CameraGlRenderer(
 
         GLES20.glDisableVertexAttribArray(positionHandle)
         GLES20.glDisableVertexAttribArray(texCoordHandle)
+
+        val renderTimeMs = (System.nanoTime() - frameStartNs) / 1_000_000.0
+        onFrameRendered(RenderStats(fps = fpsEstimate, renderTimeMs = renderTimeMs))
     }
 
     companion object {
         // uCompensationMatrix is applied AFTER uSTMatrix (i.e. in the camera's
         // already sensor-corrected, upright coordinate space) rather than
-        // before it — so V1.0c-2's transform only ever has to reason about a
+        // before it — so the transform only ever has to reason about a
         // consistent, already-upright image, regardless of this specific
         // camera's sensorOrientationDegrees quirks.
         private const val VERTEX_SHADER = """
