@@ -3,8 +3,8 @@ package com.eiscamera.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.SurfaceTexture
+import android.opengl.GLSurfaceView
 import android.view.Surface
-import android.view.TextureView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -49,6 +49,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.eiscamera.camera.CameraInfo
 import com.eiscamera.motion.LiveOrientationState
+import com.eiscamera.rendering.CameraGlRenderer
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -182,20 +183,19 @@ private fun LivePreviewContent(
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
-                    TextureView(ctx).apply {
-                        surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                            override fun onSurfaceTextureAvailable(surfaceTexture: SurfaceTexture, width: Int, height: Int) {
+                    GLSurfaceView(ctx).apply {
+                        setEGLContextClientVersion(2)
+                        val renderer = CameraGlRenderer(
+                            onSurfaceTextureReady = { surfaceTexture ->
                                 viewModel.start(cameraId, Surface(surfaceTexture))
-                            }
-                            override fun onSurfaceTextureSizeChanged(surfaceTexture: SurfaceTexture, width: Int, height: Int) {}
-                            override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
-                                viewModel.stop()
-                                return true
-                            }
-                            override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) {}
-                        }
+                            },
+                        )
+                        renderer.attachTo(this)
+                        setRenderer(renderer)
+                        renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
                     }
                 },
+                onRelease = { viewModel.stop() },
             )
             when (state) {
                 is CameraPreviewUiState.Starting -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {

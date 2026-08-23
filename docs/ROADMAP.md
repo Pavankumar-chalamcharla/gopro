@@ -15,7 +15,7 @@ before the next one starts).
 | V0.7 | Camera/gyro synchronization | **Done** — empirical clock-offset estimation (gyro angular velocity vs. camera motion-energy cross-correlation, robust to unrelated clock epochs) and SLERP-based orientation interpolation at arbitrary camera timestamps |
 | V0.8 | Orientation estimation | **Done** — quaternion exponential-map integration of raw angular velocity, plus an empirical on-device drift measurement against the rotation-vector reference (with automatic bias correction from V0.3 when available) |
 | V0.9 | Motion filtering | **Done** — SLERP-based single-pole low-pass filter on the orientation stream, separating intentional motion (preserved) from hand-shake (flagged as compensation to cancel later); frequency response verified numerically against the theoretical single-pole formula before implementation |
-| V1.0 | Basic real-time EIS | In progress — split into V1.0a/b/c/d sub-stages (see below); **V1.0a and V1.0b done** |
+| V1.0 | Basic real-time EIS | In progress — split into V1.0a/b/c/d sub-stages (see below); **V1.0a, V1.0b, and V1.0c-1 done** |
 | V1.1 | GPU EIS | Not started — OpenGL ES/EGL shader-based warp, replacing any CPU path |
 | V1.2 | Adaptive crop | Not started |
 | V1.3 | Lens profiles | Not started |
@@ -257,19 +257,38 @@ change, it's split into four small, independently-testable sub-stages:
   is actually active — the numbers that prove the sensor side keeps up
   in real time, not just a smooth-looking image. Still no change to the
   image itself.
-- **V1.0c — apply the compensation transform.** This is the point a
-  custom GL/shader pipeline actually becomes necessary — take V1.0b's
-  compensation angle and warp the camera texture each frame (rotation/
-  translation + matching crop), replacing TextureView's plain display
-  with a proper OES-texture render path.
+- **V1.0c — apply the compensation transform.** Split further into two
+  sub-steps once it became clear this was the largest architectural jump
+  of the four:
+  - **V1.0c-1 — GL rendering plumbing (DONE).** `rendering/CameraGlRenderer.kt`
+    replaces V1.0a/b's `TextureView` passthrough with a real GPU render
+    path: the camera feed drawn as an external OES texture through a
+    custom shader, via `GLSurfaceView` (which owns EGL context/thread
+    setup — hand-rolling raw EGL was considered and rejected as
+    unjustified complexity for what's needed here). `compensationMatrix`
+    is a 3x3 identity matrix at this stage, applied in the shader but
+    doing nothing — the picture should look and behave identically to
+    V1.0a/b, pixel for pixel. The point of this step is entirely
+    architectural: prove the OES-texture/shader plumbing itself is
+    correct in isolation, so V1.0c-2's actual transform math is the only
+    new variable when it's added, rather than debugging GL setup and
+    stabilization math at the same time.
+  - **V1.0c-2 — the actual transform (not yet started).** Feed
+    `setCompensationMatrix` a real per-frame rotation + translation
+    derived from V1.0b's live orientation compensation, plus a matching
+    crop so the shifted content doesn't reveal empty edges. This is the
+    step where the picture will actually visibly change.
 - **V1.0d — measure it while it runs.** The spec section 19 debug
   overlay (FPS, gyro rate, EIS latency, crop %) so the numbers, not just
   the look, confirm it's working in real time.
 
-## What's next (V1.0c)
+## What's next (V1.0c-2)
 
-With V1.0b confirming the sensor pipeline keeps pace in real time
-alongside the live camera feed, V1.0c is the first stage that actually
-changes what's on screen: replace TextureView's plain passthrough with a
-real OES-texture GL render path, and apply V1.0b's compensation angle as
-an actual per-frame rotation/crop on the image.
+With the GL plumbing proven in V1.0c-1, V1.0c-2 is the step where the
+picture actually starts moving: derive a 2D rotation+translation from the
+gap between V1.0b's raw and smoothed orientation (roll maps directly to
+image rotation; pitch/yaw map to translation via the standard small-angle
+pinhole approximation, using this camera's measured focal length and
+sensor size from V0.2), verify that projection math numerically before
+touching Kotlin, then feed it into `CameraGlRenderer.setCompensationMatrix`
+each frame alongside a matching crop.
