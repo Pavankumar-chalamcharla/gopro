@@ -8,6 +8,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.eiscamera.ui.CameraPreviewScreen
+import com.eiscamera.ui.CameraPreviewViewModel
 import com.eiscamera.ui.CameraQualityScreen
 import com.eiscamera.ui.CameraQualityViewModel
 import com.eiscamera.ui.DiagnosticScreen
@@ -21,12 +23,14 @@ import com.eiscamera.ui.SyncTestViewModel
 import com.eiscamera.ui.theme.EisCameraTheme
 
 /**
- * V0.1-V0.8 entry point: launches the Device Capability Scanner and offers
+ * V0.1-V0.9 entry point: launches the Device Capability Scanner and offers
  * four optional detours — Sensor Quality (V0.3), Camera Quality (V0.4),
- * Sync Test (V0.7), and Orientation Drift (V0.8). There is no live preview
- * or recording pipeline yet — that begins at V0.9+ per docs/ROADMAP.md.
+ * Sync Test (V0.7), and Orientation Drift (V0.8) — plus a fifth: Live
+ * Preview (V1.0a), the project's first continuously-running (not
+ * bounded/timed) camera session. No stabilization is applied there yet —
+ * see docs/ROADMAP.md for the V1.0a/b/c/d sub-stage breakdown.
  * Navigation is a plain enum toggle rather than a Navigation-Compose graph
- * — five screens still don't justify that dependency (spec section 27:
+ * — six screens still don't justify that dependency (spec section 27:
  * avoid unnecessary abstraction layers).
  */
 class MainActivity : ComponentActivity() {
@@ -36,8 +40,9 @@ class MainActivity : ComponentActivity() {
     private val cameraQualityViewModel: CameraQualityViewModel by viewModels()
     private val syncTestViewModel: SyncTestViewModel by viewModels()
     private val orientationDriftViewModel: OrientationDriftViewModel by viewModels()
+    private val cameraPreviewViewModel: CameraPreviewViewModel by viewModels()
 
-    private enum class Screen { DIAGNOSTIC, SENSOR_QUALITY, CAMERA_QUALITY, SYNC_TEST, ORIENTATION_DRIFT }
+    private enum class Screen { DIAGNOSTIC, SENSOR_QUALITY, CAMERA_QUALITY, SYNC_TEST, ORIENTATION_DRIFT, CAMERA_PREVIEW }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +56,7 @@ class MainActivity : ComponentActivity() {
                         onRunCameraQualityTest = { screen = Screen.CAMERA_QUALITY },
                         onRunSyncTest = { screen = Screen.SYNC_TEST },
                         onRunOrientationDriftTest = { screen = Screen.ORIENTATION_DRIFT },
+                        onRunLivePreview = { screen = Screen.CAMERA_PREVIEW },
                     )
                     Screen.SENSOR_QUALITY -> SensorQualityScreen(
                         viewModel = sensorQualityViewModel,
@@ -66,6 +72,10 @@ class MainActivity : ComponentActivity() {
                     )
                     Screen.ORIENTATION_DRIFT -> OrientationDriftScreen(
                         viewModel = orientationDriftViewModel,
+                        onBack = { screen = Screen.DIAGNOSTIC },
+                    )
+                    Screen.CAMERA_PREVIEW -> CameraPreviewScreen(
+                        viewModel = cameraPreviewViewModel,
                         onBack = { screen = Screen.DIAGNOSTIC },
                     )
                 }

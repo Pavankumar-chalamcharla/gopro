@@ -15,7 +15,7 @@ before the next one starts).
 | V0.7 | Camera/gyro synchronization | **Done** — empirical clock-offset estimation (gyro angular velocity vs. camera motion-energy cross-correlation, robust to unrelated clock epochs) and SLERP-based orientation interpolation at arbitrary camera timestamps |
 | V0.8 | Orientation estimation | **Done** — quaternion exponential-map integration of raw angular velocity, plus an empirical on-device drift measurement against the rotation-vector reference (with automatic bias correction from V0.3 when available) |
 | V0.9 | Motion filtering | **Done** — SLERP-based single-pole low-pass filter on the orientation stream, separating intentional motion (preserved) from hand-shake (flagged as compensation to cancel later); frequency response verified numerically against the theoretical single-pole formula before implementation |
-| V1.0 | Basic real-time EIS | Not started — first end-to-end stabilized preview |
+| V1.0 | Basic real-time EIS | In progress — split into V1.0a/b/c/d sub-stages (see below); **V1.0a done** |
 | V1.1 | GPU EIS | Not started — OpenGL ES/EGL shader-based warp, replacing any CPU path |
 | V1.2 | Adaptive crop | Not started |
 | V1.3 | Lens profiles | Not started |
@@ -217,17 +217,49 @@ its own. Real sensor data did.
   filtering components ("known input signal -> expected frequency
   response").
 
-## What's next (V1.0)
+## V1.0 sub-stages
 
-Every building block V1.0 needs now exists: device capability scanning
-(V0.2), measured sensor/camera/sync quality (V0.3/V0.4/V0.7), continuous
-orientation integration (V0.8), and motion filtering (V0.9). **V1.0: Basic
-real-time EIS** is the first stage that wires these into an actual live
-pipeline — open the camera preview continuously (not just a timed test
-window), integrate gyro in real time, filter it, compute a per-frame
-compensation transform, and apply it to the preview via GPU (or a
-placeholder CPU path first, per spec section 17's "measure before
-assuming GPU is faster"). This is a meaningfully bigger jump than V0.2-V0.9
-— it's the first version with a continuously running pipeline instead of
-a bounded test window, which changes the threading and lifecycle
-questions substantially (spec section 28).
+V1.0 ("Basic real-time EIS") is a meaningfully bigger jump than any prior
+version — it's the first continuously-running pipeline instead of a
+bounded test window, which changes the threading and lifecycle questions
+substantially (spec section 28). Rather than deliver it as one large
+change, it's split into four small, independently-testable sub-stages:
+
+- **V1.0a — continuous GPU preview, unstabilized (DONE).** Prove the
+  basic plumbing: camera opens, stays open, renders continuously,
+  releases cleanly on exit. `CameraPreviewViewModel` manages a
+  **repeating** Camera2 capture session (`setRepeatingRequest`, not the
+  bounded single-capture loop V0.4/V0.7/V0.8 used) targeting a
+  `TextureView`'s own `SurfaceTexture`. Deliberately NOT GL/shader-based
+  yet: TextureView displays the camera feed itself with no custom
+  rendering code needed, and introducing a custom OES-texture/shader
+  pipeline isn't justified until V1.0c actually needs to warp the image
+  — spec section 12's "don't add sophistication without evidence"
+  applies to architecture choices too, not just algorithms. Wired into
+  `MainActivity` as a fifth screen alongside the four existing tests.
+  Known limitation, stated rather than silently ignored: camera release
+  is currently tied to Compose leaving the screen (`DisposableEffect`),
+  not to the Activity's onPause/onStop — backgrounding the whole app
+  won't yet release the camera. Worth closing before V1.0 is "done,"
+  not before V1.0a specifically.
+- **V1.0b — live orientation pipeline running alongside it.** Run V0.8's
+  GyroIntegrator + V0.9's OrientationSmoothingFilter continuously while
+  the preview is up; surface the compensation angle as debug text only,
+  no image changes yet. Proves the sensor pipeline keeps up in real time
+  without stalling the camera thread.
+- **V1.0c — apply the compensation transform.** This is the point a
+  custom GL/shader pipeline actually becomes necessary — take V1.0b's
+  compensation angle and warp the camera texture each frame (rotation/
+  translation + matching crop), replacing TextureView's plain display
+  with a proper OES-texture render path.
+- **V1.0d — measure it while it runs.** The spec section 19 debug
+  overlay (FPS, gyro rate, EIS latency, crop %) so the numbers, not just
+  the look, confirm it's working in real time.
+
+## What's next (V1.0b)
+
+With V1.0a's plumbing proven, V1.0b adds the sensor side: start
+GyroIntegrator + OrientationSmoothingFilter running continuously
+alongside the now-continuous camera preview, and confirm — with actual
+numbers, not just a smooth-looking image — that the sensor pipeline
+keeps pace with real time without ever blocking the camera thread.

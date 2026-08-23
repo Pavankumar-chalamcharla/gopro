@@ -44,6 +44,7 @@ fun DiagnosticScreen(
     onRunCameraQualityTest: () -> Unit = {},
     onRunSyncTest: () -> Unit = {},
     onRunOrientationDriftTest: () -> Unit = {},
+    onRunLivePreview: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsState()
 
@@ -63,7 +64,7 @@ fun DiagnosticScreen(
             when (val s = state) {
                 is ScanUiState.Idle, is ScanUiState.Scanning -> ScanningIndicator()
                 is ScanUiState.Failed -> ErrorView(s.message, onRetry = { viewModel.rescan() })
-                is ScanUiState.Done -> ProfileView(s.profile, s.fromCache, onRunSensorQualityTest, onRunCameraQualityTest, onRunSyncTest, onRunOrientationDriftTest)
+                is ScanUiState.Done -> ProfileView(s.profile, s.fromCache, onRunSensorQualityTest, onRunCameraQualityTest, onRunSyncTest, onRunOrientationDriftTest, onRunLivePreview)
             }
         }
     }
@@ -105,6 +106,7 @@ private fun ProfileView(
     onRunCameraQualityTest: () -> Unit,
     onRunSyncTest: () -> Unit,
     onRunOrientationDriftTest: () -> Unit,
+    onRunLivePreview: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -161,6 +163,12 @@ private fun ProfileView(
         item {
             Button(onClick = onRunOrientationDriftTest, modifier = Modifier.fillMaxWidth()) {
                 Text("Run Orientation Drift Test (V0.8)")
+            }
+        }
+
+        item {
+            Button(onClick = onRunLivePreview, modifier = Modifier.fillMaxWidth()) {
+                Text("Live Preview (V1.0 — no stabilization yet)")
             }
         }
 
