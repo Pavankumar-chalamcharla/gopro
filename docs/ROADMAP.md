@@ -16,7 +16,7 @@ before the next one starts).
 | V0.8 | Orientation estimation | **Done** — quaternion exponential-map integration of raw angular velocity, plus an empirical on-device drift measurement against the rotation-vector reference (with automatic bias correction from V0.3 when available) |
 | V0.9 | Motion filtering | **Done** — SLERP-based single-pole low-pass filter on the orientation stream, separating intentional motion (preserved) from hand-shake (flagged as compensation to cancel later); frequency response verified numerically against the theoretical single-pole formula before implementation |
 | V1.0 | Basic real-time EIS | **Done** — split into V1.0a/b/c/d sub-stages (see below), all complete: continuous GPU preview, live orientation pipeline, real-time gyro-based stabilization transform, and measured performance numbers |
-| V1.1 | GPU EIS | Not started — OpenGL ES/EGL shader-based warp, replacing any CPU path |
+| V1.1 | Save stabilized video to file | In progress — split into V1.1a/b (see below); **V1.1a done** (GPU-based EIS itself was absorbed into V1.0c, ahead of this row's original description) |
 | V1.2 | Adaptive crop | Not started |
 | V1.3 | Lens profiles | Not started |
 | V1.4 | Rolling shutter | Not started |
@@ -371,15 +371,46 @@ change, it's split into four small, independently-testable sub-stages:
   width, even after the `GLSurfaceView` LayoutParams fix above. This
   is also simply the standard pattern real camera apps use.
 
-## What's next (V1.1+)
+## V1.1 sub-stages
 
-Every V1.0 sub-stage is done: continuous GPU preview (a), live
-orientation pipeline (b), the actual GPU stabilization transform (c),
-and measured real-time performance numbers (d). V1.0 as a whole —
-**Basic real-time EIS** — is complete: a continuously-running, gyro-
-stabilized live camera preview with the numbers to back up that it's
-real. Natural next directions per the original roadmap: V1.1 (moving
-this same transform onto MediaCodec for actual video recording, not
-just live preview) or revisiting the deadband/crop-margin/cutoff
-constants now that there's a real device to tune them against, rather
-than the reasoned-but-unvalidated starting values used so far.
+Every V1.0 sub-stage is done, so V1.0 as a whole — **Basic real-time
+EIS** — is complete: a continuously-running, gyro-stabilized live
+camera preview with the numbers to back up that it's real. V1.1 is
+about actually saving that stabilized output to a video file — genuinely
+comparable in complexity to V1.0c's GL work (which needed several real-
+device rounds to get right), so it gets the same sub-staged treatment
+rather than one large, blind attempt:
+
+- **V1.1a — recording state scaffolding (DONE).** A real, working
+  Record/Stop button and elapsed-time counter
+  (`RecordingUiState`/`CameraPreviewViewModel.startRecording`/
+  `stopRecording`), with **no video actually saved yet** — stated
+  explicitly in the UI itself (`Stopped.note`), not implied to do more
+  than it does (spec section 42). This proves the state-machine and UI
+  side before the substantially harder next piece.
+  **Also fixed in this same delivery, at the user's request:** the
+  "Switch Camera" button was still wrapping one letter per line even
+  after the earlier full-screen restructure — a different, simpler bug
+  than the GLSurfaceView layout issue fixed before it. The status text
+  string was simply long enough to claim nearly the whole row before
+  Compose got to laying out the button. Fix: give the status `Text` an
+  explicit `weight(1f)` (so the button, unweighted, is always measured
+  at its natural size first and the text truncates with an ellipsis
+  instead of squeezing everything else) and shortened the string for
+  extra margin.
+- **V1.1b — the actual encoder (not yet started).** The genuinely hard
+  part: extend `CameraGlRenderer` to draw the SAME stabilized frame to
+  a second EGL surface — a `MediaCodec` encoder's input surface — in
+  addition to the screen, alongside `MediaMuxer` setup and proper
+  recording lifecycle (start/stop/release, correct timestamps, output
+  file naming). Given the real-device iteration V1.0c's GL work needed,
+  this is being planned in Python-verifiable pieces (timestamp/muxing
+  logic) before the on-device GL/encoder integration itself, the same
+  discipline that's worked throughout this project.
+
+## What's next (V1.1b)
+
+Start with the encoder configuration itself (supported formats/
+resolutions/bitrates from `MediaCodecList`, matching the "measure, don't
+assume" pattern already used for camera stream sizes in V1.0a) before
+touching the harder dual-surface GL rendering.

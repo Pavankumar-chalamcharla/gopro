@@ -47,6 +47,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -183,6 +184,7 @@ private fun LivePreviewContent(
     onSwitchCamera: () -> Unit,
 ) {
     val orientationState by viewModel.orientationState.collectAsState()
+    val recordingState by viewModel.recordingState.collectAsState()
     val cameraInfo = remember(cameraId) { viewModel.availableCameras.find { it.cameraId == cameraId } }
     var renderStats by remember(cameraId) { mutableStateOf(RenderStats()) }
 
@@ -245,25 +247,62 @@ private fun LivePreviewContent(
                 modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
             )
         }
-        Row(
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .background(Color.Black.copy(alpha = 0.55f))
                 .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Text(
-                when (state) {
-                    is CameraPreviewUiState.Running -> "Live - camera $cameraId - stabilization active (V1.0c-2)"
-                    is CameraPreviewUiState.Starting -> "Starting..."
-                    is CameraPreviewUiState.Failed -> "Failed"
-                    is CameraPreviewUiState.Idle -> "Idle"
-                },
-                color = Color.White,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            TextButton(onClick = onSwitchCamera) { Text("Switch Camera", color = Color.White) }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    when (state) {
+                        is CameraPreviewUiState.Running -> "Camera $cameraId - stabilized"
+                        is CameraPreviewUiState.Starting -> "Starting..."
+                        is CameraPreviewUiState.Failed -> "Failed"
+                        is CameraPreviewUiState.Idle -> "Idle"
+                    },
+                    modifier = Modifier.weight(1f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                TextButton(onClick = onSwitchCamera) { Text("Switch Camera", color = Color.White) }
+            }
+            if (state is CameraPreviewUiState.Running) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        when (val r = recordingState) {
+                            is RecordingUiState.Idle -> "Not recording"
+                            is RecordingUiState.Recording -> "Recording %02d:%02d".format(r.elapsedSeconds / 60, r.elapsedSeconds % 60)
+                            is RecordingUiState.Stopped -> r.note
+                        },
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = if (recordingState is RecordingUiState.Recording) Color.Red else Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    TextButton(
+                        onClick = {
+                            if (recordingState is RecordingUiState.Recording) viewModel.stopRecording() else viewModel.startRecording()
+                        },
+                    ) {
+                        Text(
+                            if (recordingState is RecordingUiState.Recording) "Stop" else "Record",
+                            color = Color.White,
+                        )
+                    }
+                }
+            }
         }
     }
 }
