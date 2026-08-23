@@ -15,7 +15,7 @@ before the next one starts).
 | V0.7 | Camera/gyro synchronization | **Done** — empirical clock-offset estimation (gyro angular velocity vs. camera motion-energy cross-correlation, robust to unrelated clock epochs) and SLERP-based orientation interpolation at arbitrary camera timestamps |
 | V0.8 | Orientation estimation | **Done** — quaternion exponential-map integration of raw angular velocity, plus an empirical on-device drift measurement against the rotation-vector reference (with automatic bias correction from V0.3 when available) |
 | V0.9 | Motion filtering | **Done** — SLERP-based single-pole low-pass filter on the orientation stream, separating intentional motion (preserved) from hand-shake (flagged as compensation to cancel later); frequency response verified numerically against the theoretical single-pole formula before implementation |
-| V1.0 | Basic real-time EIS | In progress — split into V1.0a/b/c/d sub-stages (see below); **V1.0a done** |
+| V1.0 | Basic real-time EIS | In progress — split into V1.0a/b/c/d sub-stages (see below); **V1.0a and V1.0b done** |
 | V1.1 | GPU EIS | Not started — OpenGL ES/EGL shader-based warp, replacing any CPU path |
 | V1.2 | Adaptive crop | Not started |
 | V1.3 | Lens profiles | Not started |
@@ -241,12 +241,22 @@ change, it's split into four small, independently-testable sub-stages:
   is currently tied to Compose leaving the screen (`DisposableEffect`),
   not to the Activity's onPause/onStop — backgrounding the whole app
   won't yet release the camera. Worth closing before V1.0 is "done,"
-  not before V1.0a specifically.
-- **V1.0b — live orientation pipeline running alongside it.** Run V0.8's
-  GyroIntegrator + V0.9's OrientationSmoothingFilter continuously while
-  the preview is up; surface the compensation angle as debug text only,
-  no image changes yet. Proves the sensor pipeline keeps up in real time
-  without stalling the camera thread.
+  not before V1.0a specifically. Confirmed stable on-device over long
+  duration.
+- **V1.0b — live orientation pipeline running alongside it (DONE).**
+  `motion/LiveOrientationPipeline.kt` continuously integrates raw gyro
+  samples (V0.8's GyroIntegrator, bias-corrected using whatever V0.3
+  last measured) and runs the result through V0.9's low-pass filter
+  (2.0Hz default cutoff — a starting point, not yet tuned against real
+  hand-shake/pan data), in real time, on its own dedicated
+  HandlerThread — never the main thread, so continuous ~200Hz
+  quaternion math can't compete with UI rendering or the camera's own
+  callbacks. `CameraPreviewViewModel` starts/stops it alongside the
+  camera session; a small debug overlay on the live preview shows gyro
+  rate, compensation angle, sample count, and whether bias correction
+  is actually active — the numbers that prove the sensor side keeps up
+  in real time, not just a smooth-looking image. Still no change to the
+  image itself.
 - **V1.0c — apply the compensation transform.** This is the point a
   custom GL/shader pipeline actually becomes necessary — take V1.0b's
   compensation angle and warp the camera texture each frame (rotation/
@@ -256,10 +266,10 @@ change, it's split into four small, independently-testable sub-stages:
   overlay (FPS, gyro rate, EIS latency, crop %) so the numbers, not just
   the look, confirm it's working in real time.
 
-## What's next (V1.0b)
+## What's next (V1.0c)
 
-With V1.0a's plumbing proven, V1.0b adds the sensor side: start
-GyroIntegrator + OrientationSmoothingFilter running continuously
-alongside the now-continuous camera preview, and confirm — with actual
-numbers, not just a smooth-looking image — that the sensor pipeline
-keeps pace with real time without ever blocking the camera thread.
+With V1.0b confirming the sensor pipeline keeps pace in real time
+alongside the live camera feed, V1.0c is the first stage that actually
+changes what's on screen: replace TextureView's plain passthrough with a
+real OES-texture GL render path, and apply V1.0b's compensation angle as
+an actual per-frame rotation/crop on the image.

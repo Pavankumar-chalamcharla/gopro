@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.eiscamera.camera.CameraInfo
+import com.eiscamera.motion.LiveOrientationState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -174,6 +175,8 @@ private fun LivePreviewContent(
     state: CameraPreviewUiState,
     onSwitchCamera: () -> Unit,
 ) {
+    val orientationState by viewModel.orientationState.collectAsState()
+
     Column(modifier = Modifier.fillMaxSize()) {
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             AndroidView(
@@ -210,6 +213,12 @@ private fun LivePreviewContent(
                 }
                 else -> {}
             }
+            if (state is CameraPreviewUiState.Running) {
+                OrientationDebugOverlay(
+                    orientationState = orientationState,
+                    modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
+                )
+            }
         }
         Row(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -225,6 +234,42 @@ private fun LivePreviewContent(
                 style = MaterialTheme.typography.bodyMedium,
             )
             TextButton(onClick = onSwitchCamera) { Text("Switch Camera") }
+        }
+    }
+}
+
+/**
+ * V1.0b: shows the orientation pipeline running alongside the preview is
+ * actually keeping up in real time — gyro rate should sit near the ~199Hz
+ * V0.3 measured on this device, and sample count should climb steadily
+ * with no long pauses. compensationAngle is what a future stabilization
+ * transform would need to cancel; it does nothing to the image yet.
+ */
+@Composable
+private fun OrientationDebugOverlay(orientationState: LiveOrientationState, modifier: Modifier = Modifier) {
+    Card(modifier = modifier) {
+        Column(modifier = Modifier.padding(10.dp)) {
+            Text(
+                "V1.0b orientation pipeline",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                "Gyro: " + (orientationState.gyroRateHz?.let { "%.0f Hz".format(it) } ?: "..."),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Text(
+                "Compensation: %.2f deg".format(Math.toDegrees(orientationState.compensationAngleRad)),
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Text(
+                "Samples: ${orientationState.sampleCount}",
+                style = MaterialTheme.typography.labelSmall,
+            )
+            Text(
+                if (orientationState.biasCorrectionApplied) "Bias-corrected (V0.3)" else "No bias correction (run V0.3 first)",
+                style = MaterialTheme.typography.labelSmall,
+            )
         }
     }
 }

@@ -14,6 +14,8 @@ import com.eiscamera.camera.CameraInfo
 import com.eiscamera.camera.CameraSessionUtils
 import com.eiscamera.deviceprofile.DeviceProfileRepository
 import com.eiscamera.logging.EisLog
+import com.eiscamera.motion.LiveOrientationPipeline
+import com.eiscamera.motion.LiveOrientationState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -27,19 +29,25 @@ sealed interface CameraPreviewUiState {
 }
 
 /**
- * Manages a CONTINUOUS Camera2 preview session — the first component in
- * this project that isn't a bounded, timed collection. Every prior camera
- * component (V0.4, V0.7) opened the camera, ran for a fixed number of
- * seconds, and closed it. This one runs until the screen is left. No
- * stabilization happens here yet (roadmap V1.0's first sub-stage) — this
- * is deliberately just the foundation: get a real-time preview on screen
- * with correct lifecycle management, before adding gyro integration,
- * filtering, and warping on top of it. See docs/ROADMAP.md.
+ * Manages a CONTINUOUS Camera2 preview session (V1.0a) plus, since V1.0b,
+ * a continuously-running orientation pipeline alongside it — the first
+ * time V0.8's integrator and V0.9's filter run outside a bounded test
+ * window. The two are started/stopped together deliberately: proving
+ * they can run concurrently without one stalling the other is V1.0b's
+ * actual goal. No image transform yet — [orientationState] is exposed
+ * for display only; applying it to the preview is V1.0c. See
+ * docs/ROADMAP.md for the full V1.0a/b/c/d breakdown.
  */
 class CameraPreviewViewModel(application: Application) : AndroidViewModel(application) {
 
     private val cameraManager = application.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val repository = DeviceProfileRepository(application)
+
+    private val orientationPipeline = LiveOrientationPipeline(
+        context = application,
+        biasRadS = repository.load()?.sensorQuality?.let { doubleArrayOf(it.biasXRadS, it.biasYRadS, it.biasZRadS) },
+    )
+    val orientationState: StateFlow<LiveOrientationState> = orientationPipeline.state
 
     private var camera: CameraDevice? = null
     private var session: CameraCaptureSession? = null
@@ -74,6 +82,8 @@ class CameraPreviewViewModel(application: Application) : AndroidViewModel(applic
                 }
                 sess.setRepeatingRequest(requestBuilder.build(), null, h)
 
+                orientationPipeline.start()
+
                 EisLog.i(EisLog.Tag.CAMERA, "Live preview started on camera $cameraId")
                 _state.value = CameraPreviewUiState.Running(cameraId)
             } catch (e: Exception) {
@@ -93,6 +103,7 @@ class CameraPreviewViewModel(application: Application) : AndroidViewModel(applic
     }
 
     private fun cleanup() {
+        orientationPipeline.stop()
         try {
             session?.stopRepeating()
         } catch (e: Exception) {
