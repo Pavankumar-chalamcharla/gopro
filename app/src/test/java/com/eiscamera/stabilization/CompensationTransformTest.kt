@@ -28,14 +28,21 @@ class CompensationTransformTest {
     }
 
     @Test
-    fun `crop alone keeps the center fixed and pushes edges out of range`() {
+    fun `crop alone keeps the center fixed and pulls edges safely inside the source range`() {
+        // Corrected expectation: a crop should sample the CENTRAL region of
+        // the source and stretch it to fill the frame, so edges pull IN
+        // toward the center, not push OUT beyond [0,1] -- an earlier version
+        // of this test asserted the opposite (edges exceeding 1.0), which
+        // was itself the bug: verifying against a wrong mental model gave
+        // false confidence. See CompensationTransform.compose's kdoc.
         val m = CompensationTransform.compose(rollRad = 0.0, dxNorm = 0.0, dyNorm = 0.0, cropMargin = 0.10)
         val (cx, cy) = applyColumnMajor(m, 0.5, 0.5)
         assertEquals(0.5, cx, 1e-6)
         assertEquals(0.5, cy, 1e-6)
 
         val (ex, _) = applyColumnMajor(m, 1.0, 0.5)
-        assertTrue("expected the cropped edge to sample beyond 1.0, got $ex", ex > 1.0)
+        assertTrue("expected the cropped edge to sample within [0,1], got $ex", ex in 0.0..1.0)
+        assertTrue("expected the edge to be pulled visibly inward from 1.0, got $ex", ex < 1.0)
     }
 
     @Test

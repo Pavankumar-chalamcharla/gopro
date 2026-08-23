@@ -187,7 +187,17 @@ object CompensationTransform {
      */
     fun compose(rollRad: Double, dxNorm: Double, dyNorm: Double, cropMargin: Double): FloatArray {
         require(cropMargin in 0.0..0.9) { "cropMargin should be a fraction in [0, 0.9), got $cropMargin" }
-        val scaleFactor = 1.0 / (1.0 - cropMargin)
+        // Sampling the CENTRAL (1-cropMargin) fraction of the source and
+        // stretching it to fill the destination frame means scaling the
+        // SOURCE offset-from-center DOWN by (1-cropMargin) -- e.g. a
+        // destination edge at offset 0.5 from center should sample the
+        // source at offset 0.5*(1-cropMargin), pulled IN from the true
+        // edge, not push OUT beyond it. An earlier version of this file
+        // used 1/(1-cropMargin) here instead — the reciprocal, which
+        // zooms sampling OUT rather than in, the opposite of a crop —
+        // confirmed as the cause of a real corner/edge blur on-device;
+        // see math-verification notes for the corrected derivation.
+        val scaleFactor = 1.0 - cropMargin
 
         val tCenterNeg = translationMatrix(-0.5, -0.5)
         val rotation = rotationMatrix(rollRad)

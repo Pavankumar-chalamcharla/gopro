@@ -325,6 +325,31 @@ change, it's split into four small, independently-testable sub-stages:
     correction now clamped explicitly and gracefully at that boundary,
     rather than left to whatever raw GL edge-clamping happened to
     produce.
+    **Two more real bugs found from a second round of on-device
+    testing, both confirmed numerically before fixing:**
+    1. Persistent corner/edge blur, even with no shake at all — the
+       crop's scale factor was inverted (`1/(1-cropMargin)` instead of
+       `1-cropMargin`), which zooms sampling OUT rather than in, the
+       opposite of a crop. Verified: at 20% margin the old formula put
+       every frame corner at (1.125, 1.125) — already outside the valid
+       [0,1] texture range at baseline, guaranteeing edge-clamp smear
+       on every frame regardless of correction. The ORIGINAL
+       verification test for this had the same wrong expectation baked
+       in ("edge should sample beyond 1.0, correctly cropped out") — a
+       real reminder that passing a test only proves consistency with
+       what the test asserts, not correctness, if the assertion itself
+       encodes the wrong mental model. Both the formula and the test
+       are now corrected together.
+    2. The live preview only filled roughly half the screen height,
+       with the bottom status row visibly squeezed into a sliver width
+       (its "Switch Camera" text was wrapping one letter per line —
+       the telltale sign of a badly-constrained width). `GLSurfaceView`
+       is a `SurfaceView` subclass, a class with known, longstanding
+       layout-measurement quirks when embedded without explicit size
+       hints, since its content renders through a separate compositor
+       layer rather than the normal View drawing path. Now given
+       explicit `MATCH_PARENT` LayoutParams rather than relying on
+       Compose's `AndroidView` default sizing inference.
 - **V1.0d — measure it while it runs.** The spec section 19 debug
   overlay (FPS, gyro rate, EIS latency, crop %) so the numbers, not just
   the look, confirm it's working in real time.

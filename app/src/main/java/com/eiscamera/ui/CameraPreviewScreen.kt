@@ -187,6 +187,10 @@ private fun LivePreviewContent(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
                     GLSurfaceView(ctx).apply {
+                        layoutParams = android.view.ViewGroup.LayoutParams(
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                            android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
                         setEGLContextClientVersion(2)
                         val renderer = CameraGlRenderer(
                             onSurfaceTextureReady = { surfaceTexture ->
