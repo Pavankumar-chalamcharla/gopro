@@ -310,6 +310,21 @@ change, it's split into four small, independently-testable sub-stages:
     that's a one-line sign flip in `CompensationTransform.compose`, not
     a deeper problem — a normal first-pass step for this class of
     feature, not evidence something was done wrong.
+    **Fixed after real-device testing reported two specific, useful
+    symptoms:** "wobbling on small shakes" and "no correction on large
+    shakes." Both root-caused with actual simulation numbers before
+    fixing (spec section 40), not guessed at — see
+    CompensationTransform's kdoc for the full reasoning. Wobble: this
+    device's synthesized gyro has known, already-measured integration
+    drift (V0.3/V0.8) that a fixed low-pass filter can't distinguish
+    from genuine slow motion, so the smoothed reference itself wanders;
+    a deadband (ignore below 0.15°, ramp to full strength by 0.6°)
+    stops the filter from chasing that noise. No correction on big
+    shakes: the original 10% crop margin only covered ~±4° before
+    sampling ran outside the texture — increased to 20% (~±8°) with
+    correction now clamped explicitly and gracefully at that boundary,
+    rather than left to whatever raw GL edge-clamping happened to
+    produce.
 - **V1.0d — measure it while it runs.** The spec section 19 debug
   overlay (FPS, gyro rate, EIS latency, crop %) so the numbers, not just
   the look, confirm it's working in real time.

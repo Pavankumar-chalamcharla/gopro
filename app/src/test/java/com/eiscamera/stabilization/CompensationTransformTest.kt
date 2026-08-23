@@ -87,4 +87,49 @@ class CompensationTransformTest {
         assertEquals(0.5, x, 1e-6)
         assertEquals(0.5, y, 1e-6)
     }
+
+    @Test
+    fun `deadband suppresses noise-scale wobble but passes real motion through`() {
+        // A tiny 0.05deg correction (well under the 0.15deg deadband) should
+        // apply essentially zero shift -- this is what stops the device's
+        // known integration noise (V0.3/V0.8) from visibly "wobbling" the
+        // image at rest.
+        val tinyYaw = Math.toRadians(0.05)
+        val tinyCorrection = doubleArrayOf(cos(tinyYaw / 2), 0.0, sin(tinyYaw / 2), 0.0)
+        val mTiny = CompensationTransform.buildMatrix(tinyCorrection, 3.98, 5.6, 4.2)
+        val (txTiny, _) = applyColumnMajor(mTiny, 0.5, 0.5)
+        assertEquals("tiny noise-scale correction should be fully suppressed", 0.5, txTiny, 1e-6)
+
+        // A real 2deg correction (well above the 0.6deg full-ramp point)
+        // should apply at full strength, same as before the deadband existed.
+        val realYaw = Math.toRadians(2.0)
+        val realCorrection = doubleArrayOf(cos(realYaw / 2), 0.0, sin(realYaw / 2), 0.0)
+        val mReal = CompensationTransform.buildMatrix(realCorrection, 3.98, 5.6, 4.2)
+        val (txReal, _) = applyColumnMajor(mReal, 0.5, 0.5)
+        assertTrue("real motion should still produce a visible shift", kotlin.math.abs(txReal - 0.5) > 0.005)
+    }
+
+    @Test
+    fun `large shake clamps gracefully instead of exceeding the crop margin`() {
+        // A large 25deg yaw would need a far bigger crop than is available;
+        // the transform should cap at a safe, bounded shift rather than
+        // sampling outside the valid [0,1] texture range.
+        val bigYaw = Math.toRadians(25.0)
+        val bigCorrection = doubleArrayOf(cos(bigYaw / 2), 0.0, sin(bigYaw / 2), 0.0)
+        val m = CompensationTransform.buildMatrix(
+            correctionQuaternion = bigCorrection,
+            focalLengthMm = 3.98,
+            sensorWidthMm = 5.6,
+            sensorHeightMm = 4.2,
+            cropMargin = 0.20,
+        )
+        val (x, _) = applyColumnMajor(m, 0.5, 0.5)
+        val maxExpectedShift = 0.20 * 0.4 // matches MAX_SHIFT_FRACTION_OF_CROP
+        assertTrue(
+            "expected the shift to be capped near $maxExpectedShift, got ${x - 0.5}",
+            kotlin.math.abs(x - 0.5 - maxExpectedShift) < 1e-4,
+        )
+        // Still within the valid sampling range, unlike the pre-fix behavior.
+        assertTrue(x in 0.0..1.0)
+    }
 }

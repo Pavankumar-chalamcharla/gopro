@@ -34,17 +34,55 @@ import kotlin.math.sin
  * written: error is ~0.0001° even at a 2° rotation, and ~0.0016° at 5° —
  * both far smaller than any shake this filter is meant to correct.
  *
- * CROP: a fixed zoom-in factor (default 10%) keeps typical compensation
+ * CROP: a fixed zoom-in factor (now 20%, see below) keeps compensation
  * shifts sampling safely inside the source texture instead of visibly
- * smearing the clamped edge (spec section 14). 10% is a STARTING value,
- * not yet tuned against this device's actually-measured shake
- * magnitudes — worth revisiting once V1.0d's overlay can show real
- * compensation-angle statistics over time (spec section 33: state
- * whether a constant is experimentally tuned, not just its value).
+ * smearing the clamped edge (spec section 14).
+ *
+ * TWO ISSUES FOUND ON FIRST REAL-DEVICE TEST, both root-caused with
+ * actual numbers before fixing (spec section 40's debugging methodology)
+ * rather than guessed at:
+ *
+ * 1. WOBBLE ON SMALL/NO SHAKE. This device's gyroscope is a
+ *    software-synthesized "virtual_gyro" (V0.2's finding) with real,
+ *    already-measured drift when integrated — V0.8 found 11-15° of pure
+ *    drift over just 10 stationary seconds, even bias-corrected. A fixed
+ *    low-pass filter has no way to tell "genuine slow intentional pan"
+ *    apart from "slow drift accumulated from integrated sensor noise" —
+ *    both look identical in the frequency domain — so the smoothed
+ *    reference itself inherits some of that drift, and the resulting
+ *    gap (compensation) fluctuates even at rest. [deadbandRad]/
+ *    [fullRampRad] suppress correction below a small threshold and ramp
+ *    it in smoothly (not a hard on/off snap) above it — standard
+ *    practice in gimbal/EIS control for exactly this reason. Values are
+ *    STARTING points sized against this project's own V0.3 noise
+ *    measurement, not yet tuned against a longer real capture.
+ * 2. NO VISIBLE CORRECTION ON LARGE/FAST SHAKE. The original 10% crop
+ *    margin allows only ~±4° of shift before sampling runs outside the
+ *    source texture and hits the raw GL_CLAMP_TO_EDGE behavior — real
+ *    shake routinely exceeds that, so correction simply ran out of room
+ *    well before it could look like it was doing anything. This is a
+ *    genuine physical tradeoff, not a bug to fully eliminate: bigger
+ *    correction always costs more FOV (spec section 14). The margin is
+ *    now 20% (~±8° before clamping) and [maxShiftNorm]/[maxRollRad]
+ *    clamp explicitly and gracefully at that boundary, rather than
+ *    leaving the cap to whatever GL's raw texture clamping happens to
+ *    look like.
  */
 object CompensationTransform {
 
-    const val DEFAULT_CROP_MARGIN = 0.10
+    const val DEFAULT_CROP_MARGIN = 0.20
+    const val DEFAULT_DEADBAND_DEG = 0.15
+    const val DEFAULT_FULL_RAMP_DEG = 0.6
+    const val DEFAULT_MAX_ROLL_DEG = 8.0
+
+    /** Fraction of the crop margin reserved as the maximum safe shift —
+     *  leaves headroom so a simultaneous roll rotation's own corner sweep
+     *  doesn't push past the cropped region even when translation is
+     *  already near its cap. Verified numerically (see math-verification
+     *  notes) rather than derived from an exact corner-sweep formula —
+     *  a deliberate simplification (spec section 12), revisit if V1.0d's
+     *  overlay shows this capping more often than expected in practice. */
+    private const val MAX_SHIFT_FRACTION_OF_CROP = 0.4
 
     /**
      * Builds the 3x3 texture-coordinate transform matrix, in the
@@ -69,23 +107,60 @@ object CompensationTransform {
         sensorWidthMm: Double?,
         sensorHeightMm: Double?,
         cropMargin: Double = DEFAULT_CROP_MARGIN,
+        deadbandRad: Double = Math.toRadians(DEFAULT_DEADBAND_DEG),
+        fullRampRad: Double = Math.toRadians(DEFAULT_FULL_RAMP_DEG),
+        maxRollRad: Double = Math.toRadians(DEFAULT_MAX_ROLL_DEG),
     ): FloatArray {
         val thetaX = 2.0 * correctionQuaternion[1]
         val thetaY = 2.0 * correctionQuaternion[2]
-        val rollRad = 2.0 * correctionQuaternion[3]
+        var rollRad = 2.0 * correctionQuaternion[3]
 
-        val dxNorm = if (focalLengthMm != null && sensorWidthMm != null && sensorWidthMm > 0) {
+        var dxNorm = if (focalLengthMm != null && sensorWidthMm != null && sensorWidthMm > 0) {
             thetaY * (focalLengthMm / sensorWidthMm)
         } else {
             0.0
         }
-        val dyNorm = if (focalLengthMm != null && sensorHeightMm != null && sensorHeightMm > 0) {
+        var dyNorm = if (focalLengthMm != null && sensorHeightMm != null && sensorHeightMm > 0) {
             thetaX * (focalLengthMm / sensorHeightMm)
         } else {
             0.0
         }
 
+        // Deadband: total rotation magnitude drives one scale factor applied
+        // uniformly to roll/dx/dy, so direction stays intact and only
+        // overall strength ramps — see class kdoc, issue 1.
+        val totalAngleRad = 2.0 * kotlin.math.acos(correctionQuaternion[0].coerceIn(-1.0, 1.0))
+        val strength = deadbandScale(totalAngleRad, deadbandRad, fullRampRad)
+        rollRad *= strength
+        dxNorm *= strength
+        dyNorm *= strength
+
+        // Graceful cap at the crop margin's safe boundary — see class kdoc, issue 2.
+        val maxShiftNorm = cropMargin * MAX_SHIFT_FRACTION_OF_CROP
+        dxNorm = dxNorm.coerceIn(-maxShiftNorm, maxShiftNorm)
+        dyNorm = dyNorm.coerceIn(-maxShiftNorm, maxShiftNorm)
+        rollRad = rollRad.coerceIn(-maxRollRad, maxRollRad)
+
         return compose(rollRad, dxNorm, dyNorm, cropMargin)
+    }
+
+    /**
+     * MEANING: converts a total correction-angle magnitude into a [0,1]
+     *   strength multiplier — 0 below [deadbandRad] (treated as noise,
+     *   not real shake), ramping linearly to 1 at [fullRampRad].
+     * LOWER deadbandRad → more small-angle wobble gets "corrected"
+     *   (which, per this class's kdoc issue 1, tends to make wobble MORE
+     *   visible, not less, since it's chasing noise).
+     * HIGHER deadbandRad → more genuine small motion gets ignored too.
+     * DEVICE-DEPENDENT: the right value scales with this device's own
+     *   measured integration noise (V0.3) — not yet tuned per-device
+     *   automatically; DEFAULT_DEADBAND_DEG is sized against this
+     *   project's own V0.3 measurement as a starting point.
+     */
+    private fun deadbandScale(angleRad: Double, deadbandRad: Double, fullRampRad: Double): Double {
+        if (angleRad <= deadbandRad) return 0.0
+        if (angleRad >= fullRampRad) return 1.0
+        return (angleRad - deadbandRad) / (fullRampRad - deadbandRad)
     }
 
     /**
