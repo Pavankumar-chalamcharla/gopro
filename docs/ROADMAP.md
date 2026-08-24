@@ -16,7 +16,7 @@ before the next one starts).
 | V0.8 | Orientation estimation | **Done** — quaternion exponential-map integration of raw angular velocity, plus an empirical on-device drift measurement against the rotation-vector reference (with automatic bias correction from V0.3 when available) |
 | V0.9 | Motion filtering | **Done** — SLERP-based single-pole low-pass filter on the orientation stream, separating intentional motion (preserved) from hand-shake (flagged as compensation to cancel later); frequency response verified numerically against the theoretical single-pole formula before implementation |
 | V1.0 | Basic real-time EIS | **Done** — split into V1.0a/b/c/d sub-stages (see below), all complete: continuous GPU preview, live orientation pipeline, real-time gyro-based stabilization transform, and measured performance numbers |
-| V1.1 | Save stabilized video to file | In progress — split into V1.1a/b (see below); **V1.1a done** (GPU-based EIS itself was absorbed into V1.0c, ahead of this row's original description) |
+| V1.1 | Save stabilized video to file | In progress — split into V1.1a/b1/b2 (see below); **V1.1a and V1.1b-1 done** |
 | V1.2 | Adaptive crop | Not started |
 | V1.3 | Lens profiles | Not started |
 | V1.4 | Rolling shutter | Not started |
@@ -398,19 +398,43 @@ rather than one large, blind attempt:
   at its natural size first and the text truncates with an ellipsis
   instead of squeezing everything else) and shortened the string for
   extra margin.
-- **V1.1b — the actual encoder (not yet started).** The genuinely hard
-  part: extend `CameraGlRenderer` to draw the SAME stabilized frame to
-  a second EGL surface — a `MediaCodec` encoder's input surface — in
-  addition to the screen, alongside `MediaMuxer` setup and proper
-  recording lifecycle (start/stop/release, correct timestamps, output
-  file naming). Given the real-device iteration V1.0c's GL work needed,
-  this is being planned in Python-verifiable pieces (timestamp/muxing
-  logic) before the on-device GL/encoder integration itself, the same
-  discipline that's worked throughout this project.
+- **V1.1b — the actual encoder.** Split further, same reasoning as
+  V1.0c: this is genuinely comparable in complexity to the GL renderer
+  work, which needed several real-device rounds.
+  - **V1.1b-1 — prove the mechanism in isolation (DONE).**
+    `recording/EncoderCapabilities.kt` queries this device's actual
+    supported encoder, resolution range, and alignment requirements
+    (never assumes H.264 "just works" at an arbitrary size — spec
+    section 18). `recording/TestPatternRecorder.kt` configures a real
+    `MediaCodec` encoder in Surface-input mode, sets up EGL BY HAND for
+    the first time in this project (there's no `GLSurfaceView`
+    equivalent for an encoder's input surface — GLSurfaceView had
+    always handled this automatically before), renders a slowly-
+    cycling solid color into it, and muxes the output into a real MP4
+    via `MediaMuxer` — completely isolated from the real camera feed on
+    purpose, so if something's wrong, it's unambiguously an encoder/EGL
+    problem and not a camera or stabilization one. Wired to the
+    existing Record button from V1.1a: tapping it now produces an
+    actual, playable (test-pattern) video file in the app's external
+    files directory, with the exact path reported back so it can be
+    checked with a file manager. **Known, stated limitation:** the
+    fixed 5-second clip isn't cancellation-aware mid-recording yet, so
+    the button disables itself during that window rather than offering
+    a "Stop" that wouldn't actually shorten it — real open-ended
+    start/stop control is V1.1b-2's job, once this is redesigned around
+    the continuously-running camera feed anyway.
+  - **V1.1b-2 — feed it the real stabilized frames (not yet started).**
+    Extend `CameraGlRenderer` to draw the SAME per-frame compensated
+    output to a second EGL surface (the encoder's, proven working in
+    b-1) in addition to the screen, and replace the fixed-duration test
+    clip with real open-ended start/stop control tied to the actual
+    recording session.
 
-## What's next (V1.1b)
+## What's next (V1.1b-2)
 
-Start with the encoder configuration itself (supported formats/
-resolutions/bitrates from `MediaCodecList`, matching the "measure, don't
-assume" pattern already used for camera stream sizes in V1.0a) before
-touching the harder dual-surface GL rendering.
+With the encoder/EGL/muxer mechanism proven working in isolation,
+V1.1b-2 is the actual integration: modify `CameraGlRenderer.onDrawFrame`
+to render the same transformed frame into a second EGL surface — the
+encoder's — whenever a recording is active, alongside the existing
+screen render, and replace `TestPatternRecorder`'s fixed duration with
+real start/stop control.

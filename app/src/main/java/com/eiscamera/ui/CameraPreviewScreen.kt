@@ -282,22 +282,24 @@ private fun LivePreviewContent(
                     Text(
                         when (val r = recordingState) {
                             is RecordingUiState.Idle -> "Not recording"
-                            is RecordingUiState.Recording -> "Recording %02d:%02d".format(r.elapsedSeconds / 60, r.elapsedSeconds % 60)
+                            is RecordingUiState.Recording -> "Test clip %ds elapsed".format(r.elapsedSeconds)
                             is RecordingUiState.Stopped -> r.note
                         },
                         modifier = Modifier.weight(1f),
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         color = if (recordingState is RecordingUiState.Recording) Color.Red else Color.White,
                         style = MaterialTheme.typography.bodyMedium,
                     )
+                    // V1.1b-1's test clip isn't cancellation-aware mid-recording
+                    // (see RecordingUiState kdoc) — disabled rather than offering
+                    // a "Stop" that wouldn't actually shorten it.
                     TextButton(
-                        onClick = {
-                            if (recordingState is RecordingUiState.Recording) viewModel.stopRecording() else viewModel.startRecording()
-                        },
+                        onClick = { viewModel.startRecording() },
+                        enabled = recordingState !is RecordingUiState.Recording,
                     ) {
                         Text(
-                            if (recordingState is RecordingUiState.Recording) "Stop" else "Record",
+                            if (recordingState is RecordingUiState.Recording) "Recording..." else "Record test clip",
                             color = Color.White,
                         )
                     }

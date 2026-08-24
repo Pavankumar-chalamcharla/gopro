@@ -16,12 +16,16 @@ import com.eiscamera.deviceprofile.DeviceProfileRepository
 import com.eiscamera.logging.EisLog
 import com.eiscamera.motion.LiveOrientationPipeline
 import com.eiscamera.motion.LiveOrientationState
+import com.eiscamera.recording.TestPatternRecorder
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 sealed interface CameraPreviewUiState {
     data object Idle : CameraPreviewUiState
@@ -31,16 +35,23 @@ sealed interface CameraPreviewUiState {
 }
 
 /**
- * V1.1a: recording state machine ONLY — no video is actually saved yet.
- * This exists to prove the UI/state side works (start/stop, a real
- * elapsed-time counter) before V1.1b adds the substantially harder part:
- * a second EGL surface targeting a MediaCodec encoder's input, drawing
- * the SAME stabilized frame there as well as to the screen. That's a
- * comparable jump in complexity to V1.0c's GL work, which needed several
- * real-device rounds to get right — not something to wire in blind
- * alongside everything else here. [Stopped.note] says so explicitly
- * rather than implying a file was saved when none was (spec section 42:
- * never claim a capability without evidence).
+ * V1.1a built the state machine with no actual recording. V1.1b-1 wires
+ * in a REAL encoder — but deliberately still not the real camera feed:
+ * tapping Record now runs TestPatternRecorder, producing an actual
+ * playable MP4 of a solid, slowly-cycling color, proving MediaCodec +
+ * manual EGL + MediaMuxer genuinely work on this device before V1.1b-2
+ * attempts the much harder part (feeding it real stabilized frames).
+ * [Stopped.note] reports the real outcome — the saved file's path on
+ * success, or the real error on failure — never a placeholder message
+ * pretending to be more than it is (spec section 42).
+ *
+ * KNOWN LIMITATION, stated rather than hidden: TestPatternRecorder
+ * currently runs a fixed short duration with no way to interrupt it
+ * early once started (its internal loop isn't cancellation-aware) — so
+ * during that window the Record/Stop button is disabled rather than
+ * implying a "stop" that wouldn't actually shorten the clip. Real
+ * open-ended start/stop control is V1.1b-2's job, once this is
+ * redesigned around the continuously-running camera feed anyway.
  */
 sealed interface RecordingUiState {
     data object Idle : RecordingUiState
@@ -90,32 +101,58 @@ class CameraPreviewViewModel(application: Application) : AndroidViewModel(applic
     val recordingState: StateFlow<RecordingUiState> = _recordingState.asStateFlow()
     private var recordingTickerJob: Job? = null
 
-    /** V1.1a: starts the elapsed-time counter only — no encoder yet (see
-     *  RecordingUiState kdoc). No-op if already recording or the preview
-     *  itself isn't running. */
+    /** V1.1b-1: runs an actual (fixed-duration, camera-independent) test
+     *  recording via TestPatternRecorder — see RecordingUiState kdoc for
+     *  what this does and doesn't prove yet. No-op if already recording
+     *  or the preview itself isn't running. */
     fun startRecording() {
         if (_state.value !is CameraPreviewUiState.Running) return
         if (_recordingState.value is RecordingUiState.Recording) return
+
+        val context = getApplication<Application>()
+        val outputDir = context.getExternalFilesDir("recordings")
+        if (outputDir == null) {
+            _recordingState.value = RecordingUiState.Stopped(0, "Failed: external storage unavailable")
+            return
+        }
+        val outputFile = File(outputDir, "test_clip_${System.currentTimeMillis()}.mp4")
+
         recordingTickerJob?.cancel()
         recordingTickerJob = viewModelScope.launch {
             var elapsed = 0
             _recordingState.value = RecordingUiState.Recording(elapsed)
-            while (true) {
-                delay(1000)
-                elapsed++
-                _recordingState.value = RecordingUiState.Recording(elapsed)
+            val tickerJob = launch {
+                while (true) {
+                    delay(1000)
+                    elapsed++
+                    _recordingState.value = RecordingUiState.Recording(elapsed)
+                }
+            }
+            val result = withContext(Dispatchers.Default) {
+                TestPatternRecorder.recordTestClip(outputFile, durationSeconds = TEST_CLIP_DURATION_S)
+            }
+            tickerJob.cancel()
+            _recordingState.value = if (result.success) {
+                RecordingUiState.Stopped(
+                    elapsedSeconds = TEST_CLIP_DURATION_S,
+                    note = "Test clip saved: ${result.outputFile?.absolutePath}",
+                )
+            } else {
+                RecordingUiState.Stopped(elapsedSeconds = elapsed, note = "Failed: ${result.error}")
             }
         }
     }
 
-    /** Stops the counter. Safe to call even if not recording. */
+    /** See RecordingUiState kdoc's "KNOWN LIMITATION": this cancels UI-side
+     *  tracking, but TestPatternRecorder's fixed-duration clip, once
+     *  started, is not currently interruptible mid-recording. */
     fun stopRecording() {
-        val elapsed = (_recordingState.value as? RecordingUiState.Recording)?.elapsedSeconds ?: 0
+        val current = _recordingState.value as? RecordingUiState.Recording ?: return
         recordingTickerJob?.cancel()
         recordingTickerJob = null
         _recordingState.value = RecordingUiState.Stopped(
-            elapsedSeconds = elapsed,
-            note = "Encoding not implemented yet (V1.1b) — no file was saved.",
+            elapsedSeconds = current.elapsedSeconds,
+            note = "UI tracking stopped, but the test clip itself keeps encoding to completion in the background (V1.1b-1 limitation — see kdoc).",
         )
     }
 
@@ -183,5 +220,12 @@ class CameraPreviewViewModel(application: Application) : AndroidViewModel(applic
     override fun onCleared() {
         cleanup()
         super.onCleared()
+    }
+
+    companion object {
+        /** V1.1b-1's TestPatternRecorder isn't cancellation-aware mid-clip
+         *  (see RecordingUiState kdoc) — kept short so that limitation is a
+         *  minor inconvenience, not a real problem, while it's still true. */
+        private const val TEST_CLIP_DURATION_S = 5
     }
 }
