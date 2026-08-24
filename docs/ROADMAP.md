@@ -414,14 +414,32 @@ rather than one large, blind attempt:
     via `MediaMuxer` — completely isolated from the real camera feed on
     purpose, so if something's wrong, it's unambiguously an encoder/EGL
     problem and not a camera or stabilization one. Wired to the
-    existing Record button from V1.1a: tapping it now produces an
-    actual, playable (test-pattern) video file in the app's external
-    files directory, with the exact path reported back so it can be
-    checked with a file manager. **Known, stated limitation:** the
-    fixed 5-second clip isn't cancellation-aware mid-recording yet, so
-    the button disables itself during that window rather than offering
-    a "Stop" that wouldn't actually shorten it — real open-ended
-    start/stop control is V1.1b-2's job, once this is redesigned around
+    existing Record button from V1.1a.
+    **Two real bugs found and fixed from the first real-device test:**
+    1. The clip finished in ~1 second instead of the requested 5 —
+       the frame loop had no pacing to real time at all (just
+       glClear+eglSwapBuffers+a poll, as fast as the CPU/GPU could go),
+       so the encoder's implicit presentation timestamps reflected a
+       tiny real elapsed time regardless of the intended duration.
+       Fixed with explicit, evenly-spaced presentation timestamps via
+       `eglPresentationTimeANDROID` plus real-time `Thread.sleep`
+       pacing, so both the encoded video's duration and the actual
+       wall-clock recording time now match what was requested.
+    2. The reported file path genuinely existed but was practically
+       invisible — it was the app's PRIVATE external-files directory,
+       which modern file manager apps commonly hide from browsing (a
+       Scoped Storage restriction most users would have no way to know
+       about or work around). Fixed by switching to `MediaStore`
+       (`recording/MediaStoreVideoOutput.kt`), saving into the public
+       Movies collection instead, where Gallery and file apps show it
+       normally. `TestPatternRecorder` now takes a `FileDescriptor`
+       rather than a `File` path so it doesn't need to know or care
+       which storage mechanism the caller used.
+    **Known, stated limitation, still true:** the fixed 5-second clip
+    isn't cancellation-aware mid-recording yet, so the button disables
+    itself during that window rather than offering a "Stop" that
+    wouldn't actually shorten it — real open-ended start/stop control
+    is V1.1b-2's job, once this is redesigned around
     the continuously-running camera feed anyway.
   - **V1.1b-2 — feed it the real stabilized frames (not yet started).**
     Extend `CameraGlRenderer` to draw the SAME per-frame compensated

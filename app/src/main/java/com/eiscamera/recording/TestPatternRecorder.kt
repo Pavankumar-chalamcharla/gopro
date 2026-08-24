@@ -8,12 +8,12 @@ import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
 import android.opengl.EGLDisplay
+import android.opengl.EGLExt
 import android.opengl.EGLSurface
 import android.opengl.GLES20
-import android.util.Size
 import android.view.Surface
 import com.eiscamera.logging.EisLog
-import java.io.File
+import java.io.FileDescriptor
 
 /**
  * V1.1b-1: proves MediaCodec (Surface-input mode) + manual EGL +
@@ -23,33 +23,43 @@ import java.io.File
  * this renders nothing but a slowly-cycling solid color, nothing from
  * the camera pipeline at all — same reasoning as V1.0c-1 (prove a new
  * mechanism works before connecting it to a harder existing system), so
- * if something's wrong here, it's unambiguously an encoder/EGL/muxer
- * problem, not a camera or stabilization one.
+ * if something's wrong here, it's unambiguously an encoder/EGL problem,
+ * not a camera or stabilization one.
  *
  * WHY MANUAL EGL: GLSurfaceView (used for the on-screen preview) owns
  * its own EGL context/surface/thread automatically — there is no
  * GLSurfaceView equivalent for a MediaCodec encoder's input surface.
- * This is the first place in the project setting up EGL by hand (EGL14:
- * eglGetDisplay / eglInitialize / eglChooseConfig / eglCreateContext /
- * eglCreateWindowSurface / eglMakeCurrent / eglSwapBuffers) — genuinely
- * new, hard-to-verify-without-a-real-device territory, the same
- * category of risk V1.0c-1's first GL renderer was. Stated plainly: this
- * may need a real-device debugging round, same as that did.
+ * This is the first place in the project setting up EGL by hand.
  *
- * THREADING: does blocking encoder-drain calls in a loop — must be
- * called from a background dispatcher (e.g. Dispatchers.Default via
- * withContext), never the main thread.
+ * OUTPUT: takes a [FileDescriptor] rather than a File path, so the
+ * caller can point this at either app-private storage or (as of the
+ * fix below) a MediaStore-backed Uri opened for writing — this class
+ * doesn't need to know or care which.
  *
- * STORAGE: writes to the app's own external files directory (no special
- * permission needed, unlike shared/Gallery storage, which needs
- * MediaStore APIs — a deliberately deferred concern; the goal here is
- * proving the encoding mechanism itself works, not the full sharing
- * experience). The caller gets the exact file path back to verify with
- * a file manager or `adb pull`.
+ * FRAME PACING (fixed after real-device testing reported a clip
+ * finishing in ~1 second instead of the requested duration): the
+ * original loop had NO pacing at all between frames — just glClear +
+ * eglSwapBuffers + a near-instant drain poll, repeated as fast as the
+ * CPU/GPU could go, with nothing tying it to real time. All [totalFrames]
+ * completed in a small fraction of a real second, and the resulting
+ * presentation timestamps (assigned implicitly by eglSwapBuffers)
+ * reflected that tiny real elapsed time — producing a video whose actual
+ * encoded duration was far under what was requested. Now each frame's
+ * presentation timestamp is set EXPLICITLY via eglPresentationTimeANDROID
+ * to a precise, evenly-spaced value based on frame index (removing any
+ * dependence on the loop's own real-time jitter), and the loop is ALSO
+ * paced with Thread.sleep to real wall-clock time, so the actual
+ * recording duration matches what was requested too — keeping the
+ * caller's own elapsed-time UI meaningful, not decoupled from reality.
+ *
+ * THREADING: does blocking encoder-drain and Thread.sleep pacing calls
+ * in a loop — must be called from a background dispatcher (e.g.
+ * Dispatchers.Default via withContext), never the main thread.
  */
 object TestPatternRecorder {
 
     private const val FRAME_RATE_FPS = 30
+    private const val FRAME_INTERVAL_NS = 1_000_000_000L / FRAME_RATE_FPS
     // 4 Mbps: a conservative, documented starting point for a low-motion
     // test clip, not yet tuned against real stabilized footage bitrate needs.
     private const val BIT_RATE = 4_000_000
@@ -57,16 +67,16 @@ object TestPatternRecorder {
     private const val EOS_DRAIN_TIMEOUT_US = 10_000L
     private const val EOS_MAX_ATTEMPTS = 200
 
-    data class Result(val success: Boolean, val outputFile: File?, val error: String?)
+    data class Result(val success: Boolean, val error: String?)
 
     fun recordTestClip(
-        outputFile: File,
+        outputFileDescriptor: FileDescriptor,
         durationSeconds: Int,
         targetWidth: Int = 1280,
         targetHeight: Int = 720,
     ): Result {
         val encoderInfo = EncoderCapabilities.findEncoder()
-            ?: return Result(false, null, "No H.264 encoder available on this device")
+            ?: return Result(false, "No H.264 encoder available on this device")
         val size = EncoderCapabilities.chooseSupportedSize(
             encoderInfo, EncoderCapabilities.MIME_TYPE_AVC, targetWidth, targetHeight,
         )
@@ -127,32 +137,45 @@ object TestPatternRecorder {
 
             if (!EGL14.eglMakeCurrent(display, windowSurface, windowSurface, context)) error("eglMakeCurrent failed")
 
-            val mux = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val mux = MediaMuxer(outputFileDescriptor, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             muxer = mux
             val muxerState = MuxerState()
             val bufferInfo = MediaCodec.BufferInfo()
 
             val totalFrames = durationSeconds * FRAME_RATE_FPS
+            val recordingStartNs = System.nanoTime()
             for (frame in 0 until totalFrames) {
+                val presentationTimeNs = frame.toLong() * FRAME_INTERVAL_NS
+
                 // Slowly-cycling color, purely so a human watching the output can
                 // confirm it's a real sequence of frames, not one static image.
                 val phase = frame.toFloat() / totalFrames
                 GLES20.glClearColor(phase, 1f - phase, 0.5f, 1f)
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                EGLExt.eglPresentationTimeANDROID(display, windowSurface, presentationTimeNs)
                 EGL14.eglSwapBuffers(display, windowSurface)
 
                 drainEncoder(enc, mux, muxerState, bufferInfo, blockForEos = false)
+
+                // Pace to real time -- see class kdoc's FRAME PACING section for
+                // why this is necessary, not optional.
+                val targetElapsedNs = presentationTimeNs + FRAME_INTERVAL_NS
+                val actualElapsedNs = System.nanoTime() - recordingStartNs
+                val sleepNs = targetElapsedNs - actualElapsedNs
+                if (sleepNs > 0) {
+                    Thread.sleep(sleepNs / 1_000_000, (sleepNs % 1_000_000).toInt())
+                }
             }
 
             enc.signalEndOfInputStream()
             drainEncoder(enc, mux, muxerState, bufferInfo, blockForEos = true)
 
             if (muxerState.started) mux.stop()
-            EisLog.i(EisLog.Tag.ENCODER, "Test clip written: ${outputFile.absolutePath}")
-            return Result(true, outputFile, null)
+            EisLog.i(EisLog.Tag.ENCODER, "Test clip encoding finished successfully")
+            return Result(true, null)
         } catch (e: Exception) {
             EisLog.e(EisLog.Tag.ENCODER, "Test pattern recording failed", e)
-            return Result(false, null, e.message ?: "Unknown encoder error")
+            return Result(false, e.message ?: "Unknown encoder error")
         } finally {
             runCatching { inputSurface?.release() }
             runCatching { if (eglSurface != null && eglDisplay != null) EGL14.eglDestroySurface(eglDisplay, eglSurface) }

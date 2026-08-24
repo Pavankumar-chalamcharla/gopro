@@ -16,6 +16,7 @@ import com.eiscamera.deviceprofile.DeviceProfileRepository
 import com.eiscamera.logging.EisLog
 import com.eiscamera.motion.LiveOrientationPipeline
 import com.eiscamera.motion.LiveOrientationState
+import com.eiscamera.recording.MediaStoreVideoOutput
 import com.eiscamera.recording.TestPatternRecorder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,7 +26,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 sealed interface CameraPreviewUiState {
     data object Idle : CameraPreviewUiState
@@ -41,14 +41,27 @@ sealed interface CameraPreviewUiState {
  * playable MP4 of a solid, slowly-cycling color, proving MediaCodec +
  * manual EGL + MediaMuxer genuinely work on this device before V1.1b-2
  * attempts the much harder part (feeding it real stabilized frames).
- * [Stopped.note] reports the real outcome — the saved file's path on
+ * [Stopped.note] reports the real outcome — the saved location on
  * success, or the real error on failure — never a placeholder message
  * pretending to be more than it is (spec section 42).
  *
- * KNOWN LIMITATION, stated rather than hidden: TestPatternRecorder
- * currently runs a fixed short duration with no way to interrupt it
+ * TWO REAL BUGS FOUND AND FIXED from on-device testing:
+ * 1. The clip finished in ~1 second instead of the requested duration —
+ *    TestPatternRecorder's frame loop had no pacing to real time at all,
+ *    so all frames pushed through in a small fraction of a second; fixed
+ *    with explicit per-frame presentation timestamps plus real-time
+ *    pacing (see that class's kdoc).
+ * 2. The reported file path genuinely existed but was practically
+ *    invisible — it was the app's PRIVATE external-files directory
+ *    (Android/data/<package>/...), which modern file manager apps
+ *    commonly hide from browsing (a Scoped Storage restriction). Fixed
+ *    by saving through MediaStore into the public Movies collection
+ *    instead (see MediaStoreVideoOutput).
+ *
+ * KNOWN LIMITATION, still true and stated rather than hidden:
+ * TestPatternRecorder's fixed short duration has no way to interrupt it
  * early once started (its internal loop isn't cancellation-aware) — so
- * during that window the Record/Stop button is disabled rather than
+ * the Record/Stop button is disabled during that window rather than
  * implying a "stop" that wouldn't actually shorten the clip. Real
  * open-ended start/stop control is V1.1b-2's job, once this is
  * redesigned around the continuously-running camera feed anyway.
@@ -110,12 +123,12 @@ class CameraPreviewViewModel(application: Application) : AndroidViewModel(applic
         if (_recordingState.value is RecordingUiState.Recording) return
 
         val context = getApplication<Application>()
-        val outputDir = context.getExternalFilesDir("recordings")
-        if (outputDir == null) {
-            _recordingState.value = RecordingUiState.Stopped(0, "Failed: external storage unavailable")
+        val displayName = "eiscamera_test_${System.currentTimeMillis()}.mp4"
+        val pending = MediaStoreVideoOutput.createPending(context, displayName)
+        if (pending == null) {
+            _recordingState.value = RecordingUiState.Stopped(0, "Failed: could not create an output file via MediaStore")
             return
         }
-        val outputFile = File(outputDir, "test_clip_${System.currentTimeMillis()}.mp4")
 
         recordingTickerJob?.cancel()
         recordingTickerJob = viewModelScope.launch {
@@ -129,16 +142,20 @@ class CameraPreviewViewModel(application: Application) : AndroidViewModel(applic
                 }
             }
             val result = withContext(Dispatchers.Default) {
-                TestPatternRecorder.recordTestClip(outputFile, durationSeconds = TEST_CLIP_DURATION_S)
+                context.contentResolver.openFileDescriptor(pending.uri, "w")?.use { pfd ->
+                    TestPatternRecorder.recordTestClip(pfd.fileDescriptor, durationSeconds = TEST_CLIP_DURATION_S)
+                } ?: TestPatternRecorder.Result(false, "Could not open the MediaStore entry for writing")
             }
             tickerJob.cancel()
-            _recordingState.value = if (result.success) {
-                RecordingUiState.Stopped(
+            if (result.success) {
+                MediaStoreVideoOutput.finalizePending(context, pending.uri)
+                _recordingState.value = RecordingUiState.Stopped(
                     elapsedSeconds = TEST_CLIP_DURATION_S,
-                    note = "Test clip saved: ${result.outputFile?.absolutePath}",
+                    note = "Saved to Movies/EisCamera as $displayName — check your Gallery or Files app",
                 )
             } else {
-                RecordingUiState.Stopped(elapsedSeconds = elapsed, note = "Failed: ${result.error}")
+                MediaStoreVideoOutput.deletePending(context, pending.uri)
+                _recordingState.value = RecordingUiState.Stopped(elapsedSeconds = elapsed, note = "Failed: ${result.error}")
             }
         }
     }
