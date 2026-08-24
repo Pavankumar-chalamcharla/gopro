@@ -220,9 +220,13 @@ private fun LivePreviewContent(
                     renderer.attachTo(this)
                     setRenderer(renderer)
                     renderMode = GLSurfaceView.RENDERMODE_WHEN_DIRTY
+                    viewModel.registerRenderer(renderer, this)
                 }
             },
-            onRelease = { viewModel.stop() },
+            onRelease = {
+                viewModel.unregisterRenderer()
+                viewModel.stop()
+            },
         )
         when (state) {
             is CameraPreviewUiState.Starting -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -282,7 +286,7 @@ private fun LivePreviewContent(
                     Text(
                         when (val r = recordingState) {
                             is RecordingUiState.Idle -> "Not recording"
-                            is RecordingUiState.Recording -> "Test clip %ds elapsed".format(r.elapsedSeconds)
+                            is RecordingUiState.Recording -> "Recording %02d:%02d".format(r.elapsedSeconds / 60, r.elapsedSeconds % 60)
                             is RecordingUiState.Stopped -> r.note
                         },
                         modifier = Modifier.weight(1f),
@@ -291,15 +295,15 @@ private fun LivePreviewContent(
                         color = if (recordingState is RecordingUiState.Recording) Color.Red else Color.White,
                         style = MaterialTheme.typography.bodyMedium,
                     )
-                    // V1.1b-1's test clip isn't cancellation-aware mid-recording
-                    // (see RecordingUiState kdoc) — disabled rather than offering
-                    // a "Stop" that wouldn't actually shorten it.
+                    // V1.1b-2: genuinely open-ended now — Stop actually stops it,
+                    // unlike V1.1b-1's fixed-duration test clip.
                     TextButton(
-                        onClick = { viewModel.startRecording() },
-                        enabled = recordingState !is RecordingUiState.Recording,
+                        onClick = {
+                            if (recordingState is RecordingUiState.Recording) viewModel.stopRecording() else viewModel.startRecording()
+                        },
                     ) {
                         Text(
-                            if (recordingState is RecordingUiState.Recording) "Recording..." else "Record test clip",
+                            if (recordingState is RecordingUiState.Recording) "Stop" else "Record",
                             color = Color.White,
                         )
                     }

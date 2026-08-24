@@ -1,14 +1,19 @@
 package com.eiscamera.rendering
 
 import android.graphics.SurfaceTexture
+import android.opengl.EGL14
+import android.opengl.EGLConfig
+import android.opengl.EGLSurface
 import android.opengl.GLES11Ext
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
+import com.eiscamera.logging.EisLog
+import com.eiscamera.recording.EncoderSession
 import com.eiscamera.stabilization.CompensationTransform
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
-import javax.microedition.khronos.egl.EGLConfig
+import javax.microedition.khronos.egl.EGLConfig as GlesEGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /**
@@ -26,54 +31,42 @@ data class RenderStats(val fps: Double? = null, val renderTimeMs: Double? = null
 /**
  * V1.0c-1 built the GPU render path: the camera feed drawn as an external
  * OES texture through our own shader, via GLSurfaceView (which owns EGL
- * context/thread setup for us; hand-rolling raw EGL was considered and
- * rejected as unnecessary complexity for what's needed here — spec
- * section 12's "don't add sophistication without evidence" applies to
- * architecture choices, not just algorithms).
+ * context/thread setup for us). V1.0c-2 applies live gyro-based
+ * stabilization. V1.0d added measured performance numbers.
  *
- * V1.0c-2 is the first change that actually alters the image: each
- * frame, [correctionQuaternionProvider] is asked for the current
- * shake-cancelling rotation (from V1.0b's LiveOrientationPipeline),
- * converted to a 2D texture transform by
- * stabilization.CompensationTransform (verified numerically before this
- * was written), and applied live. [focalLengthMm]/[sensorWidthMm]/
- * [sensorHeightMm] are this camera's already-measured V0.2 values, used
- * for the pitch/yaw-to-shift approximation — pass null for any that
- * aren't available rather than guessing (spec section 16).
+ * V1.1b-2 (this version): can ALSO draw the exact same transformed frame
+ * into a second target — a MediaCodec encoder's input surface — so what
+ * gets recorded is genuinely the same stabilized output shown on screen,
+ * not a separate/different render pass. [beginRecording]/[endRecording]
+ * manage a second EGLSurface sharing this renderer's own GL context;
+ * [onDrawFrame] draws to it (if active) right after the normal screen
+ * draw, using the SAME already-computed compensation matrix and texture
+ * state — no redundant work, just one extra draw+swap+drain per frame.
  *
- * THREADING: every method here runs on GLSurfaceView's own dedicated GL
- * thread, with the EGL context already current — this class must never
- * be called from any other thread, and never touches GL state outside
- * these callbacks. [correctionQuaternionProvider] is the one exception:
- * it's invoked from this GL thread but reads state that
- * LiveOrientationPipeline updates from its OWN separate sensor thread —
- * that cross-thread read is LiveOrientationPipeline's responsibility to
- * make safe (see its AtomicReference-based snapshot), not this class's.
- * [onFrameRendered] is likewise invoked from this GL thread every frame;
- * its receiver (V1.0d's debug overlay, via a StateFlow) is responsible
- * for safely observing that from the main thread, not this class.
+ * WHY A SHARED CONTEXT, NOT A NEW ONE: GLSurfaceView owns the GL thread's
+ * context and never exposes it directly through the public Renderer API
+ * — but a context IS guaranteed current whenever onDrawFrame runs, so
+ * [beginRecording] queries "what's current right now" via
+ * EGL14.eglGetCurrentContext/eglGetCurrentDisplay rather than needing
+ * GLSurfaceView to hand it over. Creating the recording EGLSurface
+ * against that SAME context means it shares the same texture (the OES
+ * camera texture uploaded once per frame) automatically — no separate
+ * upload or copy needed for the second draw target.
  *
- * FRAME LIFECYCLE / BACKPRESSURE: Camera2 (on its own camera thread, see
- * CameraPreviewViewModel) writes completed frames into this class's
- * SurfaceTexture. SurfaceTexture always retains only the latest
- * unconsumed frame — if the GL thread is momentarily behind, older
- * frames are silently dropped rather than queued, the correct
- * backpressure behavior for a live preview (spec section 28).
- * [onFrameAvailable] requests a redraw; [onDrawFrame] then calls
- * [SurfaceTexture.updateTexImage] to latch the newest frame before
- * drawing it.
+ * THREADING: [beginRecording]/[endRecording] MUST be called via
+ * GLSurfaceView.queueEvent (never directly from another thread) — they
+ * touch EGL/GL state and must run on the GL thread, same as every other
+ * method here. The caller is responsible for confirming [endRecording]
+ * has actually finished running on the GL thread before releasing the
+ * underlying encoder Surface elsewhere (see CameraPreviewViewModel) —
+ * queueEvent alone doesn't provide that confirmation; a synchronization
+ * point is needed on the calling side.
  *
- * SIGN CONVENTION CAVEAT (also stated in CompensationTransform's kdoc,
- * worth repeating at the integration point): if the stabilization looks
- * like it's moving the wrong way on-device, that's a one-line sign flip
- * in CompensationTransform.compose, not a problem with this class or a
- * sign something is fundamentally wrong — a normal, expected first-pass
- * step for this class of feature.
- *
- * V1.0d added [onFrameRendered]: fires once per drawn frame with a
- * rolling FPS estimate and this frame's CPU-side render time, so the
- * debug overlay can show measured real-time numbers rather than an
- * assumption that GL rendering "must be" keeping up (spec section 19).
+ * SIGN CONVENTION CAVEAT (also stated in CompensationTransform's kdoc):
+ * if stabilization looks like it's moving the wrong way on-device,
+ * that's a one-line sign flip in CompensationTransform.compose, not a
+ * deeper problem — a normal, expected first-pass step for this class of
+ * feature.
  */
 class CameraGlRenderer(
     private val onSurfaceTextureReady: (SurfaceTexture) -> Unit,
@@ -100,6 +93,14 @@ class CameraGlRenderer(
     private var lastFrameStartNs: Long? = null
     private var fpsEstimate: Double? = null
 
+    private var screenWidth = 0
+    private var screenHeight = 0
+
+    // V1.1b-2: recording target, set via beginRecording/cleared via
+    // endRecording — both must run on this GL thread (see class kdoc).
+    private var recordingSession: EncoderSession? = null
+    private var recordingEglSurface: EGLSurface? = null
+
     private val vertexBuffer: FloatBuffer
     private val texCoordBuffer: FloatBuffer
 
@@ -119,7 +120,65 @@ class CameraGlRenderer(
         glSurfaceView = view
     }
 
-    override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
+    /**
+     * Starts drawing every subsequent frame into [session]'s encoder
+     * surface too, in addition to the screen. MUST be called via
+     * glSurfaceView.queueEvent. No-op if a recording is already active.
+     */
+    fun beginRecording(session: EncoderSession) {
+        if (recordingSession != null) {
+            EisLog.w(EisLog.Tag.GPU, "beginRecording called while already recording — ignoring")
+            return
+        }
+        val display = EGL14.eglGetCurrentDisplay()
+        val context = EGL14.eglGetCurrentContext()
+        if (display == EGL14.EGL_NO_DISPLAY || context == EGL14.EGL_NO_CONTEXT) {
+            EisLog.e(EisLog.Tag.GPU, "beginRecording: no current EGL display/context")
+            return
+        }
+        val configAttribs = intArrayOf(
+            EGL14.EGL_RED_SIZE, 8,
+            EGL14.EGL_GREEN_SIZE, 8,
+            EGL14.EGL_BLUE_SIZE, 8,
+            EGL14.EGL_ALPHA_SIZE, 8,
+            EGL14.EGL_RENDERABLE_TYPE, EGL14.EGL_OPENGL_ES2_BIT,
+            EGL14.EGL_NONE,
+        )
+        val configs = arrayOfNulls<EGLConfig>(1)
+        val numConfigs = IntArray(1)
+        if (!EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0) || numConfigs[0] == 0) {
+            EisLog.e(EisLog.Tag.GPU, "beginRecording: eglChooseConfig failed")
+            return
+        }
+        val config = configs[0] ?: return
+        val surfaceAttribs = intArrayOf(EGL14.EGL_NONE)
+        val eglSurface = EGL14.eglCreateWindowSurface(display, config, session.encoderInputSurface, surfaceAttribs, 0)
+        if (eglSurface == EGL14.EGL_NO_SURFACE) {
+            EisLog.e(EisLog.Tag.GPU, "beginRecording: eglCreateWindowSurface failed")
+            return
+        }
+        recordingEglSurface = eglSurface
+        recordingSession = session
+        EisLog.i(EisLog.Tag.GPU, "Recording surface attached")
+    }
+
+    /** Stops drawing into the recording surface and destroys it. MUST be
+     *  called via glSurfaceView.queueEvent. Does NOT call
+     *  EncoderSession.stop() — that's the caller's job, and must only
+     *  happen after this has actually run (see class kdoc). Safe to call
+     *  even if no recording is active. */
+    fun endRecording() {
+        val display = EGL14.eglGetCurrentDisplay()
+        val surface = recordingEglSurface
+        if (surface != null && display != EGL14.EGL_NO_DISPLAY) {
+            runCatching { EGL14.eglDestroySurface(display, surface) }
+        }
+        recordingEglSurface = null
+        recordingSession = null
+        EisLog.i(EisLog.Tag.GPU, "Recording surface detached")
+    }
+
+    override fun onSurfaceCreated(gl: GL10?, config: GlesEGLConfig?) {
         program = ShaderUtil.linkProgram(VERTEX_SHADER, FRAGMENT_SHADER)
         positionHandle = GLES20.glGetAttribLocation(program, "aPosition")
         texCoordHandle = GLES20.glGetAttribLocation(program, "aTexCoord")
@@ -142,6 +201,8 @@ class CameraGlRenderer(
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
+        screenWidth = width
+        screenHeight = height
         GLES20.glViewport(0, 0, width, height)
     }
 
@@ -168,6 +229,44 @@ class CameraGlRenderer(
             cropMargin = cropMargin,
         )
 
+        // Draw to the screen (the surface GLSurfaceView already made current).
+        GLES20.glViewport(0, 0, screenWidth, screenHeight)
+        drawScene(compensationMatrix)
+
+        // V1.1b-2: if recording, draw the SAME transformed frame again into
+        // the encoder's surface, then hand it to the encoder. This is the
+        // exact reason [beginRecording] shares this renderer's own context:
+        // the OES texture just uploaded above is already valid here, no
+        // separate upload needed.
+        val session = recordingSession
+        val recSurface = recordingEglSurface
+        if (session != null && recSurface != null) {
+            val display = EGL14.eglGetCurrentDisplay()
+            val screenDrawSurface = EGL14.eglGetCurrentSurface(EGL14.EGL_DRAW)
+            val currentContext = EGL14.eglGetCurrentContext()
+            if (EGL14.eglMakeCurrent(display, recSurface, recSurface, currentContext)) {
+                GLES20.glViewport(0, 0, session.size.width, session.size.height)
+                drawScene(compensationMatrix)
+                EGL14.eglSwapBuffers(display, recSurface)
+                session.drainEncoder()
+                // Restore the screen as current before returning — GLSurfaceView
+                // expects its own surface to still be current after onDrawFrame.
+                EGL14.eglMakeCurrent(display, screenDrawSurface, screenDrawSurface, currentContext)
+            } else {
+                EisLog.w(EisLog.Tag.GPU, "Recording frame: eglMakeCurrent to recording surface failed, skipping this frame")
+            }
+        }
+
+        val renderTimeMs = (System.nanoTime() - frameStartNs) / 1_000_000.0
+        onFrameRendered(RenderStats(fps = fpsEstimate, renderTimeMs = renderTimeMs))
+    }
+
+    /** The actual draw call sequence, shared between the screen target and
+     *  (when active) the recording target — both need the exact same
+     *  vertex/texture/shader setup, just targeting whatever surface is
+     *  current at the time this is called. Caller sets the viewport and
+     *  makes the correct surface current before calling this. */
+    private fun drawScene(compensationMatrix: FloatArray) {
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
         GLES20.glUseProgram(program)
@@ -191,9 +290,6 @@ class CameraGlRenderer(
 
         GLES20.glDisableVertexAttribArray(positionHandle)
         GLES20.glDisableVertexAttribArray(texCoordHandle)
-
-        val renderTimeMs = (System.nanoTime() - frameStartNs) / 1_000_000.0
-        onFrameRendered(RenderStats(fps = fpsEstimate, renderTimeMs = renderTimeMs))
     }
 
     companion object {

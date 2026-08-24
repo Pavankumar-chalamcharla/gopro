@@ -16,7 +16,7 @@ before the next one starts).
 | V0.8 | Orientation estimation | **Done** — quaternion exponential-map integration of raw angular velocity, plus an empirical on-device drift measurement against the rotation-vector reference (with automatic bias correction from V0.3 when available) |
 | V0.9 | Motion filtering | **Done** — SLERP-based single-pole low-pass filter on the orientation stream, separating intentional motion (preserved) from hand-shake (flagged as compensation to cancel later); frequency response verified numerically against the theoretical single-pole formula before implementation |
 | V1.0 | Basic real-time EIS | **Done** — split into V1.0a/b/c/d sub-stages (see below), all complete: continuous GPU preview, live orientation pipeline, real-time gyro-based stabilization transform, and measured performance numbers |
-| V1.1 | Save stabilized video to file | In progress — split into V1.1a/b1/b2 (see below); **V1.1a and V1.1b-1 done** |
+| V1.1 | Save stabilized video to file | **Done** — real, open-ended recording of the actual stabilized camera feed to a discoverable MP4 file |
 | V1.2 | Adaptive crop | Not started |
 | V1.3 | Lens profiles | Not started |
 | V1.4 | Rolling shutter | Not started |
@@ -441,18 +441,40 @@ rather than one large, blind attempt:
     wouldn't actually shorten it — real open-ended start/stop control
     is V1.1b-2's job, once this is redesigned around
     the continuously-running camera feed anyway.
-  - **V1.1b-2 — feed it the real stabilized frames (not yet started).**
-    Extend `CameraGlRenderer` to draw the SAME per-frame compensated
-    output to a second EGL surface (the encoder's, proven working in
-    b-1) in addition to the screen, and replace the fixed-duration test
-    clip with real open-ended start/stop control tied to the actual
-    recording session.
+  - **V1.1b-2 — feed it the real stabilized frames (DONE).**
+    `CameraGlRenderer` now draws each frame's already-computed
+    stabilization transform to a SECOND target — a `MediaCodec`
+    encoder's input surface, via `beginRecording`/`endRecording` — in
+    addition to the screen, immediately after the normal screen draw.
+    The shared-context technique (querying `EGL14
+    .eglGetCurrentContext/eglGetCurrentDisplay` from inside
+    `onDrawFrame`, since GLSurfaceView never exposes these directly, but
+    a context is guaranteed current whenever that callback runs) means
+    the second surface reuses the exact same OES camera texture already
+    uploaded for the screen draw that frame — no separate upload or
+    copy. `recording/EncoderSession.kt` generalizes V1.1b-1's proven
+    encoder/muxer logic into an open-ended session instead of a fixed
+    duration. `CameraPreviewViewModel` gained `registerRenderer`/
+    `unregisterRenderer` so recording can reach the live renderer's GL
+    thread via `GLSurfaceView.queueEvent`, and `stopRecording` uses
+    `suspendCancellableCoroutine` to genuinely WAIT for
+    `endRecording` to finish running on the GL thread before releasing
+    the encoder's surface — release ordering matters here (releasing
+    while the renderer still holds an EGLSurface wrapping it is
+    unsafe), not something `queueEvent` alone confirms. The Record
+    button is genuinely open-ended now: Stop actually stops it, saving
+    a real MP4 of the actual stabilized camera feed to Movies/EisCamera
+    via the same MediaStore path V1.1b-1's fix already established.
 
-## What's next (V1.1b-2)
+## What's next
 
-With the encoder/EGL/muxer mechanism proven working in isolation,
-V1.1b-2 is the actual integration: modify `CameraGlRenderer.onDrawFrame`
-to render the same transformed frame into a second EGL surface — the
-encoder's — whenever a recording is active, alongside the existing
-screen render, and replace `TestPatternRecorder`'s fixed duration with
-real start/stop control.
+Every planned V1.0 and V1.1 sub-stage is done: continuous GPU preview,
+live orientation pipeline, real-time gyro-based stabilization, measured
+performance numbers, and now actually saving that stabilized output to
+a real, playable, discoverable video file. This is a natural point to
+pause on new features and spend time tuning the constants that were
+always marked as reasoned-but-unvalidated starting points against real
+recorded footage now that it exists — the deadband/crop-margin/cutoff
+values in `stabilization/CompensationTransform.kt`, primarily — before
+reaching for the next roadmap stage (V1.2 adaptive crop, V1.3 lens
+profiles, V1.4 rolling shutter) on top of an untuned baseline.

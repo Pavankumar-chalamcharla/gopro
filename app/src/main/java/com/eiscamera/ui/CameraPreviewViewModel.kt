@@ -5,8 +5,11 @@ import android.content.Context
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
+import android.net.Uri
+import android.opengl.GLSurfaceView
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.ParcelFileDescriptor
 import android.view.Surface
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -16,16 +19,20 @@ import com.eiscamera.deviceprofile.DeviceProfileRepository
 import com.eiscamera.logging.EisLog
 import com.eiscamera.motion.LiveOrientationPipeline
 import com.eiscamera.motion.LiveOrientationState
+import com.eiscamera.recording.EncoderSession
 import com.eiscamera.recording.MediaStoreVideoOutput
-import com.eiscamera.recording.TestPatternRecorder
+import com.eiscamera.rendering.CameraGlRenderer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 
 sealed interface CameraPreviewUiState {
     data object Idle : CameraPreviewUiState
@@ -35,53 +42,30 @@ sealed interface CameraPreviewUiState {
 }
 
 /**
- * V1.1a built the state machine with no actual recording. V1.1b-1 wires
- * in a REAL encoder — but deliberately still not the real camera feed:
- * tapping Record now runs TestPatternRecorder, producing an actual
- * playable MP4 of a solid, slowly-cycling color, proving MediaCodec +
- * manual EGL + MediaMuxer genuinely work on this device before V1.1b-2
- * attempts the much harder part (feeding it real stabilized frames).
- * [Stopped.note] reports the real outcome — the saved location on
- * success, or the real error on failure — never a placeholder message
- * pretending to be more than it is (spec section 42).
+ * V1.1a built the state machine with no actual recording. V1.1b-1 proved
+ * MediaCodec + manual EGL + MediaMuxer work at all, in isolation, with a
+ * solid-color test pattern (deliberately not the camera feed). V1.1b-2
+ * (this version) is the real thing: [startRecording] now drives an
+ * open-ended [EncoderSession] and tells the live [CameraGlRenderer] to
+ * draw the SAME stabilized frame it's already showing on screen into the
+ * encoder too, via [CameraGlRenderer.beginRecording] — genuine open-ended
+ * start/stop control, the limitation V1.1b-1 explicitly left for this
+ * stage.
  *
- * TWO REAL BUGS FOUND AND FIXED from on-device testing:
- * 1. The clip finished in ~1 second instead of the requested duration —
- *    TestPatternRecorder's frame loop had no pacing to real time at all,
- *    so all frames pushed through in a small fraction of a second; fixed
- *    with explicit per-frame presentation timestamps plus real-time
- *    pacing (see that class's kdoc).
- * 2. The reported file path genuinely existed but was practically
- *    invisible — it was the app's PRIVATE external-files directory
- *    (Android/data/<package>/...), which modern file manager apps
- *    commonly hide from browsing (a Scoped Storage restriction). Fixed
- *    by saving through MediaStore into the public Movies collection
- *    instead (see MediaStoreVideoOutput).
+ * RENDERER REGISTRATION: [CameraGlRenderer] and its [GLSurfaceView] are
+ * created inside CameraPreviewScreen's Compose factory, not by this
+ * ViewModel — [registerRenderer]/[unregisterRenderer] are how the screen
+ * hands over live references so recording can reach the GL thread via
+ * [GLSurfaceView.queueEvent]. If a recording is somehow still active when
+ * [unregisterRenderer] is called (the screen going away mid-recording),
+ * it's stopped first rather than leaking the encoder.
  *
- * KNOWN LIMITATION, still true and stated rather than hidden:
- * TestPatternRecorder's fixed short duration has no way to interrupt it
- * early once started (its internal loop isn't cancellation-aware) — so
- * the Record/Stop button is disabled during that window rather than
- * implying a "stop" that wouldn't actually shorten the clip. Real
- * open-ended start/stop control is V1.1b-2's job, once this is
- * redesigned around the continuously-running camera feed anyway.
- */
-sealed interface RecordingUiState {
-    data object Idle : RecordingUiState
-    data class Recording(val elapsedSeconds: Int) : RecordingUiState
-    data class Stopped(val elapsedSeconds: Int, val note: String) : RecordingUiState
-}
-
-/**
- * Manages a CONTINUOUS Camera2 preview session (V1.0a) plus, since V1.0b,
- * a continuously-running orientation pipeline alongside it — the first
- * time V0.8's integrator and V0.9's filter run outside a bounded test
- * window. The two are started/stopped together deliberately: proving
- * they can run concurrently without one stalling the other is V1.0b's
- * actual goal. V1.0c-2 applies the resulting compensation live; V1.0d
- * adds measured performance numbers. V1.1a adds recording STATE only
- * (see RecordingUiState kdoc) — no video is saved yet. See
- * docs/ROADMAP.md for the full breakdown.
+ * STOP ORDERING: releasing the encoder's input Surface while
+ * CameraGlRenderer still holds an EGLSurface wrapping it is unsafe —
+ * [stopRecording] uses [suspendCancellableCoroutine] to genuinely wait
+ * for [CameraGlRenderer.endRecording] to finish running on the GL thread
+ * (queueEvent alone doesn't provide that confirmation) before calling
+ * [EncoderSession.stop].
  */
 class CameraPreviewViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -114,26 +98,75 @@ class CameraPreviewViewModel(application: Application) : AndroidViewModel(applic
     val recordingState: StateFlow<RecordingUiState> = _recordingState.asStateFlow()
     private var recordingTickerJob: Job? = null
 
-    /** V1.1b-1: runs an actual (fixed-duration, camera-independent) test
-     *  recording via TestPatternRecorder — see RecordingUiState kdoc for
-     *  what this does and doesn't prove yet. No-op if already recording
-     *  or the preview itself isn't running. */
+    private var activeRenderer: CameraGlRenderer? = null
+    private var activeGlSurfaceView: GLSurfaceView? = null
+    private var activeEncoderSession: EncoderSession? = null
+    private var activePfd: ParcelFileDescriptor? = null
+    private var activePendingUri: Uri? = null
+    private var activeDisplayName: String? = null
+
+    /** Called once the live preview's GLSurfaceView/renderer exist, so
+     *  recording can reach them. See class kdoc. */
+    fun registerRenderer(renderer: CameraGlRenderer, glSurfaceView: GLSurfaceView) {
+        activeRenderer = renderer
+        activeGlSurfaceView = glSurfaceView
+    }
+
+    /** Called when the preview's view is going away. Stops any active
+     *  recording first rather than leaking the encoder. */
+    fun unregisterRenderer() {
+        if (activeEncoderSession != null) stopRecording()
+        activeRenderer = null
+        activeGlSurfaceView = null
+    }
+
+    /** Starts an open-ended recording of the live stabilized preview.
+     *  No-op if already recording, the preview isn't running, or the
+     *  renderer isn't registered yet. */
     fun startRecording() {
         if (_state.value !is CameraPreviewUiState.Running) return
         if (_recordingState.value is RecordingUiState.Recording) return
-
-        val context = getApplication<Application>()
-        val displayName = "eiscamera_test_${System.currentTimeMillis()}.mp4"
-        val pending = MediaStoreVideoOutput.createPending(context, displayName)
-        if (pending == null) {
-            _recordingState.value = RecordingUiState.Stopped(0, "Failed: could not create an output file via MediaStore")
+        val renderer = activeRenderer
+        val glView = activeGlSurfaceView
+        if (renderer == null || glView == null) {
+            _recordingState.value = RecordingUiState.Stopped(0, "Failed: preview not ready yet")
             return
         }
+
+        val context = getApplication<Application>()
+        val displayName = "eiscamera_${System.currentTimeMillis()}.mp4"
 
         recordingTickerJob?.cancel()
         recordingTickerJob = viewModelScope.launch {
             var elapsed = 0
             _recordingState.value = RecordingUiState.Recording(elapsed)
+
+            val pending = MediaStoreVideoOutput.createPending(context, displayName)
+            if (pending == null) {
+                _recordingState.value = RecordingUiState.Stopped(0, "Failed: could not create output via MediaStore")
+                return@launch
+            }
+            val pfd = context.contentResolver.openFileDescriptor(pending.uri, "w")
+            if (pfd == null) {
+                MediaStoreVideoOutput.deletePending(context, pending.uri)
+                _recordingState.value = RecordingUiState.Stopped(0, "Failed: could not open output for writing")
+                return@launch
+            }
+            val encoderSession = withContext(Dispatchers.Default) { EncoderSession.start(pfd.fileDescriptor) }
+            if (encoderSession == null) {
+                runCatching { pfd.close() }
+                MediaStoreVideoOutput.deletePending(context, pending.uri)
+                _recordingState.value = RecordingUiState.Stopped(0, "Failed: could not start encoder")
+                return@launch
+            }
+
+            activeEncoderSession = encoderSession
+            activePfd = pfd
+            activePendingUri = pending.uri
+            activeDisplayName = displayName
+            glView.queueEvent { renderer.beginRecording(encoderSession) }
+            EisLog.i(EisLog.Tag.ENCODER, "Recording started: $displayName")
+
             val tickerJob = launch {
                 while (true) {
                     delay(1000)
@@ -141,36 +174,54 @@ class CameraPreviewViewModel(application: Application) : AndroidViewModel(applic
                     _recordingState.value = RecordingUiState.Recording(elapsed)
                 }
             }
-            val result = withContext(Dispatchers.Default) {
-                context.contentResolver.openFileDescriptor(pending.uri, "w")?.use { pfd ->
-                    TestPatternRecorder.recordTestClip(pfd.fileDescriptor, durationSeconds = TEST_CLIP_DURATION_S)
-                } ?: TestPatternRecorder.Result(false, "Could not open the MediaStore entry for writing")
-            }
-            tickerJob.cancel()
-            if (result.success) {
-                MediaStoreVideoOutput.finalizePending(context, pending.uri)
-                _recordingState.value = RecordingUiState.Stopped(
-                    elapsedSeconds = TEST_CLIP_DURATION_S,
-                    note = "Saved to Movies/EisCamera as $displayName — check your Gallery or Files app",
-                )
-            } else {
-                MediaStoreVideoOutput.deletePending(context, pending.uri)
-                _recordingState.value = RecordingUiState.Stopped(elapsedSeconds = elapsed, note = "Failed: ${result.error}")
+            try {
+                awaitCancellation()
+            } finally {
+                tickerJob.cancel()
             }
         }
     }
 
-    /** See RecordingUiState kdoc's "KNOWN LIMITATION": this cancels UI-side
-     *  tracking, but TestPatternRecorder's fixed-duration clip, once
-     *  started, is not currently interruptible mid-recording. */
+    /** Stops an active recording and finalizes the saved file. Safe to
+     *  call even if not recording. */
     fun stopRecording() {
-        val current = _recordingState.value as? RecordingUiState.Recording ?: return
+        val encoderSession = activeEncoderSession ?: return
+        val renderer = activeRenderer
+        val glView = activeGlSurfaceView
+        val pfd = activePfd
+        val pendingUri = activePendingUri
+        val displayName = activeDisplayName ?: "recording"
+        val elapsed = (_recordingState.value as? RecordingUiState.Recording)?.elapsedSeconds ?: 0
+
+        activeEncoderSession = null
+        activePfd = null
+        activePendingUri = null
+        activeDisplayName = null
         recordingTickerJob?.cancel()
         recordingTickerJob = null
-        _recordingState.value = RecordingUiState.Stopped(
-            elapsedSeconds = current.elapsedSeconds,
-            note = "UI tracking stopped, but the test clip itself keeps encoding to completion in the background (V1.1b-1 limitation — see kdoc).",
-        )
+
+        viewModelScope.launch(Dispatchers.Default) {
+            if (renderer != null && glView != null) {
+                // Genuinely WAIT for endRecording to finish on the GL thread —
+                // see class kdoc's STOP ORDERING notes for why this can't be
+                // fire-and-forget.
+                suspendCancellableCoroutine { cont ->
+                    glView.queueEvent {
+                        renderer.endRecording()
+                        cont.resume(Unit)
+                    }
+                }
+            }
+            encoderSession.stop()
+            runCatching { pfd?.close() }
+            val context = getApplication<Application>()
+            if (pendingUri != null) MediaStoreVideoOutput.finalizePending(context, pendingUri)
+            EisLog.i(EisLog.Tag.ENCODER, "Recording stopped: $displayName")
+            _recordingState.value = RecordingUiState.Stopped(
+                elapsedSeconds = elapsed,
+                note = "Saved to Movies/EisCamera as $displayName",
+            )
+        }
     }
 
     /** Starts a continuous preview targeting [surface]. No-op if already running/starting. */
@@ -216,6 +267,7 @@ class CameraPreviewViewModel(application: Application) : AndroidViewModel(applic
     }
 
     private fun cleanup() {
+        if (activeEncoderSession != null) stopRecording()
         recordingTickerJob?.cancel()
         recordingTickerJob = null
         _recordingState.value = RecordingUiState.Idle
@@ -238,11 +290,17 @@ class CameraPreviewViewModel(application: Application) : AndroidViewModel(applic
         cleanup()
         super.onCleared()
     }
+}
 
-    companion object {
-        /** V1.1b-1's TestPatternRecorder isn't cancellation-aware mid-clip
-         *  (see RecordingUiState kdoc) — kept short so that limitation is a
-         *  minor inconvenience, not a real problem, while it's still true. */
-        private const val TEST_CLIP_DURATION_S = 5
-    }
+/**
+ * V1.1a built the state machine with no actual recording. V1.1b-1 wired
+ * in a real encoder proven on an isolated test pattern. V1.1b-2 (this
+ * version) drives real, open-ended recording of the actual stabilized
+ * camera feed — see [CameraPreviewViewModel]'s kdoc for the full
+ * start/stop coordination this required.
+ */
+sealed interface RecordingUiState {
+    data object Idle : RecordingUiState
+    data class Recording(val elapsedSeconds: Int) : RecordingUiState
+    data class Stopped(val elapsedSeconds: Int, val note: String) : RecordingUiState
 }
